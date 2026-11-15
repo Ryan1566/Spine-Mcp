@@ -1,0 +1,145 @@
+{
+  "skeleton": {
+    "hash": "fixture-hash",
+    "spine": "3.8.75",
+    "width": 256,
+    "height": 256,
+    "images": ""
+  },
+  "bones": [
+    {
+      "name": "root"
+    },
+    {
+      "name": "body",
+      "parent": "root"
+    },
+    {
+      "name": "head",
+      "parent": "body"
+    },
+    {
+      "name": "weapon",
+      "parent": "body"
+    }
+  ],
+  "slots": [
+    {
+      "name": "weapon_slot",
+      "bone": "weapon",
+      "attachment": "sword"
+    },
+    {
+      "name": "eye",
+      "bone": "head",
+      "attachment": "eye_open"
+    }
+  ],
+  "skins": {
+    "default": {
+      "weapon_slot": {
+        "sword": {
+          "width": 32,
+          "height": 64
+        }
+      },
+      "eye": {
+        "eye_open": {
+          "width": 16,
+          "height": 8
+        },
+        "eye_closed": {
+          "width": 16,
+          "height": 8
+        }
+      }
+    }
+  },
+  "events": {
+    "hit": {},
+    "recover": {}
+  },
+  "animations": {
+    "idle": {
+      "bones": {
+        "head": {
+          "rotate": [
+            {
+              "time": 0,
+              "angle": -2
+            },
+            {
+              "time": 0.5,
+              "angle": 2
+            },
+            {
+              "time": 1,
+              "angle": -2
+            }
+          ]
+        }
+      }
+    },
+    "attack_01": {
+      "bones": {
+        "weapon": {
+          "rotate": [
+            {
+              "time": 0,
+              "angle": -10
+            },
+            {
+              "time": 0.166667,
+              "angle": 35
+            },
+            {
+              "time": 0.333333,
+              "angle": 12
+            },
+            {
+              "time": 0.583333,
+              "angle": 0
+            }
+          ]
+        },
+        "head": {
+          "rotate": [
+            {
+              "time": 0,
+              "angle": 0
+            },
+            {
+              "time": 0.25,
+              "angle": -4
+            },
+            {
+              "time": 0.583333,
+              "angle": 0
+            }
+          ]
+        }
+      },
+      "slots": {
+        "eye": {
+          "attachment": [
+            {
+              "time": 0.25,
+              "name": "eye_closed"
+            }
+          ]
+        }
+      },
+      "events": [
+        {
+          "time": 0.166667,
+          "name": "hit",
+          "int": 1
+        },
+        {
+          "time": 0.416667,
+          "name": "recover"
+        }
+      ]
+    }
+  }
+}

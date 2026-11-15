@@ -1,0 +1,41 @@
+{
+  "skeleton": {
+    "hash": "fixture-hash",
+    "spine": "3.8.75",
+    "width": 256,
+    "height": 256,
+    "images": ""
+  },
+  "bones": [
+    { "name": "root" },
+    { "name": "body", "parent": "root" },
+    { "name": "head", "parent": "body" },
+    { "name": "weapon", "parent": "body" }
+  ],
+  "slots": [
+    { "name": "weapon_slot", "bone": "weapon", "attachment": "sword" },
+    { "name": "eye", "bone": "head", "attachment": "eye_open" }
+  ],
+  "skins": {
+    "default": {
+      "weapon_slot": { "sword": { "width": 32, "height": 64 } },
+      "eye": { "eye_open": { "width": 16, "height": 8 }, "eye_closed": { "width": 16, "height": 8 } }
+    }
+  },
+  "events": {
+    "hit": {}
+  },
+  "animations": {
+    "idle": {
+      "bones": {
+        "head": {
+          "rotate": [
+            { "time": 0, "angle": -2 },
+            { "time": 0.5, "angle": 2 },
+            { "time": 1, "angle": -2 }
+          ]
+        }
+      }
+    }
+  }
+}

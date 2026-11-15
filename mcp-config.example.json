@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "spine-mcp-local": {
+      "command": "node",
+      "args": ["D:/spine-mcp/src/index.mjs"],
+      "env": {
+        "SPINE_EXE": "D:/Spine/Spine3.8.75Pro/Spine3.8.75Pro/Spine.com"
+      }
+    }
+  }
+}
