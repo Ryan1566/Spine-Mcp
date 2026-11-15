@@ -7,8 +7,14 @@ export const SERVER_INFO = { name: 'spine-mcp-local', version: '0.1.0' };
 export const MODERN_VERSIONS = ['2026-07-28'];
 export const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
-const INSTRUCTIONS = [
-  '本机 Spine 3.8.75 动画 MCP。',
+// 2026-07-28 时代把 tools/list、prompts/list、resources/list、resources/templates/list、
+// resources/read、server/discover 的结果定义为 CacheableResult，客户端会按 schema
+// 强制校验 ttlMs（非负整数）与 cacheScope（'public' | 'private'）。
+// 缺失即报 “Invalid result for tools/list: ttlMs ... cacheScope ...”，整段工具同步失败。
+// 这里用规范默认值 0 / 'private'；本机工具结果不具备跨会话复用价值，不缓存。
+const CACHE_FIELDS = { ttlMs: 0, cacheScope: 'private' };
+
+const INSTRUCTIONS = [  '本机 Spine 3.8.75 动画 MCP。',
   '用 spine_frames_to_seconds 把「N 帧 @ fps」规格换算成 Spine 秒数，',
   '再用 spine_build_combat_animation 在 JSON 副本上写关键帧与事件帧。',
   '涉及官方 CLI 的工具需要环境变量 SPINE_EXE 指向本机 Spine.com；3.8.75 导出必须带 exportSettingsPath。',
@@ -31,6 +37,7 @@ function discoverResult(id) {
     capabilities: { tools: {} },
     _meta: { 'io.modelcontextprotocol/serverInfo': SERVER_INFO },
     instructions: INSTRUCTIONS,
+    ...CACHE_FIELDS,
   });
 }
 
@@ -73,6 +80,10 @@ async function toolsCall(id, params) {
   }
 }
 
+// 是否见过现代时代的 server/discover。用来区分「现代客户端声明了未知版本」
+// 与「旧时代客户端只是把协商到的版本号回显进 _meta」。
+let modernSeen = false;
+
 export async function handle(req) {
   if (!req || req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
     return rpcError(req?.id, -32600, 'Invalid Request');
@@ -81,18 +92,26 @@ export async function handle(req) {
   const meta = req.params?._meta ?? {};
   const requested = meta['io.modelcontextprotocol/protocolVersion'];
 
-  // 现代客户端显式声明了版本但不受支持 -> 规范要求的 -32022，并列出支持版本。
-  if (requested !== undefined && req.method !== 'initialize' && !MODERN_VERSIONS.includes(requested)) {
-    return rpcError(req.id, -32022, 'Unsupported protocol version', {
-      supported: MODERN_VERSIONS,
-      requested,
-    });
+  // 版本判定：
+  //  - 现代版本在 _meta 里 -> 放行
+  //  - 旧时代版本在 _meta 里 -> 放行（客户端回显协商结果，不是现代声明）
+  //  - 未知版本：只有在客户端做过 server/discover（即确实走现代时代）后才回 -32022；
+  //    旧时代会话里宽松放行，避免把工具同步整段打死。
+  if (requested !== undefined && req.method !== 'initialize') {
+    const known = MODERN_VERSIONS.includes(requested) || LEGACY_VERSIONS.includes(requested);
+    if (!known && modernSeen) {
+      return rpcError(req.id, -32022, 'Unsupported protocol version', {
+        supported: MODERN_VERSIONS,
+        requested,
+      });
+    }
   }
 
   switch (req.method) {
     case 'initialize':
       return legacyInitialize(req.id, req.params);
     case 'server/discover':
+      modernSeen = true;
       return discoverResult(req.id);
     case 'notifications/initialized':
     case 'notifications/cancelled':
@@ -101,13 +120,15 @@ export async function handle(req) {
     case 'ping':
       return ok(req.id, {});
     case 'tools/list':
-      return ok(req.id, { resultType: 'complete', tools: TOOLS });
+      return ok(req.id, { resultType: 'complete', tools: TOOLS, ...CACHE_FIELDS });
     case 'tools/call':
       return toolsCall(req.id, req.params);
     case 'resources/list':
-      return ok(req.id, { resultType: 'complete', resources: [] });
+      return ok(req.id, { resultType: 'complete', resources: [], ...CACHE_FIELDS });
+    case 'resources/templates/list':
+      return ok(req.id, { resultType: 'complete', resourceTemplates: [], ...CACHE_FIELDS });
     case 'prompts/list':
-      return ok(req.id, { resultType: 'complete', prompts: [] });
+      return ok(req.id, { resultType: 'complete', prompts: [], ...CACHE_FIELDS });
     default:
       return hasId
         ? rpcError(req.id, -32601, `Method not found: ${req.method}`)

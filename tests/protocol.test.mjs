@@ -59,6 +59,9 @@ test('stdio 双时代协议握手与工具调用', async () => {
 
   const tools = byId(responses, 2).result.tools;
   assert.equal(tools.length, 8);
+  // 2026-07-28 的 CacheableResult 强制校验这两个字段，DSH 缺了会整段工具同步失败。
+  assert.equal(byId(responses, 2).result.ttlMs, 0);
+  assert.equal(byId(responses, 2).result.cacheScope, 'private');
   assert.ok(tools.some((t) => t.name === 'spine_build_combat_animation'));
   assert.ok(tools.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
 
@@ -72,6 +75,8 @@ test('stdio 双时代协议握手与工具调用', async () => {
   assert.equal(discover.resultType, 'complete');
   assert.deepEqual(discover.supportedVersions, ['2026-07-28']);
   assert.deepEqual(discover.capabilities.tools, {});
+  assert.equal(discover.ttlMs, 0);
+  assert.equal(discover.cacheScope, 'private');
 
   assert.equal(byId(responses, 5).result.tools.length, 8);
   assert.equal(byId(responses, 6).error.code, -32022);
@@ -81,4 +86,23 @@ test('stdio 双时代协议握手与工具调用', async () => {
   const badExport = byId(responses, 8).result;
   assert.equal(badExport.isError, true);
   assert.match(badExport.structuredContent.error, /exportSettingsPath|非空字符串/);
+});
+
+// 回归：旧时代客户端（initialize 协商 2025-06-18/2025-11-25）会把协商到的版本号
+// 回显进每个请求的 _meta。之前的实现把它当成「现代的未知版本声明」拒成 -32022，
+// 导致 DSH 侧 mcp-client 报 initial connection or tool synchronization failed。
+test('旧时代客户端在 _meta 回显协商版本时不应被拒', async () => {
+  const { responses } = await runServer([
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'legacy-meta', version: '1' } } },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-06-18' } } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/list', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-11-25' } } },
+    { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-06-18' }, name: 'spine_frames_to_seconds', arguments: { fps: 24, frames: 24 } } },
+  ]);
+  assert.equal(responses.length, 4);
+  assert.equal(byId(responses, 2).result.tools.length, 8);
+  assert.equal(byId(responses, 3).result.tools.length, 8);
+  const call = byId(responses, 4).result;
+  assert.equal(call.isError, false);
+  assert.equal(call.structuredContent.durationSec, 1);
 });

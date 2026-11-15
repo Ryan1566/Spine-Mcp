@@ -1,0 +1,13 @@
+{
+  "class": "export-json",
+  "output": "C:/path/to/output",
+  "extension": ".json",
+  "prettyPrint": true,
+  "nonessential": true,
+  "cleanUp": false,
+  "packSource": "attachments",
+  "packTarget": "perskeleton",
+  "packAtlas": {
+    "atlasExtension": ".atlas.txt"
+  }
+}
