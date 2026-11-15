@@ -49,6 +49,9 @@ export const GUI_RUNNING_HINT = [
   '③ 显式传 allowWhenRunning=true 仍会尝试启动，但结果通常是失败。',
 ].join(' ');
 
+// 所有会写 .spine 的工具统一附带这个提示。按用户约定：只告知，不自动重载、不模拟按键。
+export const RELOAD_HINT = 'CLI 已写入 .spine 工程文件；Spine GUI 不会自动刷新，请在编辑器里手动 Ctrl+O 重新打开（若 GUI 里有未保存改动，先 Ctrl+S）。';
+
 // dryRun 只返回计划；真实执行时以 detached 方式启动，不等待 GUI 退出。
 export async function requestGuiReload({
   projectPath,

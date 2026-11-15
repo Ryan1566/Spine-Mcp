@@ -101,11 +101,18 @@ export function runSpine(args, { timeoutMs = 120000 } = {}) {
 }
 
 // 3.8.75 导出：Spine -i <in> -o <out> -e <settings.json> [-m]
-export function exportArgs({ inputPath, outputDir, exportSettingsPath, clean = false }) {
+export function exportArgs({ inputPath, outputDir, exportSettingsPath, clean = false, extraInputs = [] }) {
   assertSafePath(inputPath, 'inputPath', { mustExist: true });
   assertSafePath(outputDir, 'outputDir');
   assertSafePath(exportSettingsPath, 'exportSettingsPath', { mustExist: true });
+  if (!Array.isArray(extraInputs)) throw new Error('extraInputs 必须是数组');
+  // 3.8.75 支持一次调用里多组 -i/-e，实测可混合 JSON 与 Binary 导出。
   const args = ['-i', inputPath, '-o', outputDir, '-e', exportSettingsPath];
+  for (const [index, item] of extraInputs.entries()) {
+    assertSafePath(item?.inputPath, `extraInputs[${index}].inputPath`, { mustExist: true });
+    assertSafePath(item?.exportSettingsPath, `extraInputs[${index}].exportSettingsPath`, { mustExist: true });
+    args.push('-i', item.inputPath, '-e', item.exportSettingsPath);
+  }
   if (clean) args.push('-m');
   return args;
 }

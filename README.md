@@ -10,7 +10,7 @@
 | 协议 | **dual-era**：legacy `initialize` + modern `server/discover` / `_meta` 版本 | 仅旧握手 |
 | 帧规格 | 内置「N 帧 @ fps → Spine 秒 + 事件帧」换算与生成 | 无 |
 | 写文件 | 只写副本，源文件永不改动；覆盖必须显式 `overwrite` | 支持原地导回 |
-| 工具量 | 9 个 | 55 / 70 个 |
+| 工具量 | 20 个 | 55 / 70 个 |
 
 ## 硬前提（做不到就别装）
 
@@ -18,7 +18,7 @@
 2. 环境变量 `SPINE_EXE` 指向该可执行文件（由 MCP 配置的 `env` 传入）。
 3. Node.js ≥ 20（开发机 v22.22.2 已验证）。
 
-**MCP 不包含 Spine，也不会安装 Spine。** 没有 Spine 时，`spine_doctor`、`spine_inspect_json`、`spine_frames_to_seconds`、`spine_build_combat_animation`、`spine_validate_timeline` 仍可正常工作，只有 CLI 类工具会失败。
+**MCP 不包含 Spine，也不会安装 Spine。** 没有 Spine 时，`spine_doctor`、`spine_inspect_json`、`spine_frames_to_seconds`、`spine_build_combat_animation`、`spine_validate_timeline`、`spine_make_export_settings` 仍可正常工作，只有 CLI 类工具会失败。
 
 ## 跑起来
 
@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 9 个工具
+## 20 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -67,9 +67,53 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_build_combat_animation` | 在 JSON **副本**上写骨骼关键帧、插槽换图、事件帧 | 否 |
 | `spine_validate_timeline` | 静态校验时间轴递增、骨骼存在、事件定义齐全 | 否 |
 | `spine_export` | 官方 CLI 导出（`-i / -o / -e`，可选 `-m`） | 是 |
-| `spine_import_json` | 官方 CLI 导回 `.spine`（`-r`，可选 `-s`） | 是 |
+| `spine_import_json` | 官方 CLI 导入 JSON / binary / 另一个工程的 skeleton（`-r`，可选 `-s`） | 是 |
 | `spine_clean` | 官方 CLI 清理（`-m`） | 是 |
 | `spine_reload_gui` | 方案 C：请求 Spine GUI 重新打开工程（官方 Editor 模式），支持 `dryRun` | 可选 |
+| `spine_project_info` | 只读工程信息（`-i` Info），返回原始输出 + 结构化摘要 | 是 |
+| `spine_version` | 启动器版本信息（`--version`），只读 | 是 |
+| `spine_make_export_settings` | 生成导出设置 JSON（`json` / `binary` 均已验证），供 `spine_export` 的 `-e` 使用 | 否 |
+| `spine_verify_export` | 只读比对源工程与导出目录产物的骨骼 / 插槽 / 动画列表 | 是 |
+| `spine_pack_atlas` | 图集打包（`-i/-o/-p`，可选 `-j`/`-n`），支持图集名或 pack.json | 是 |
+| `spine_unpack_atlas` | 图集解包（`-i/-o/-c`），把 atlas 页还原成散图 | 是 |
+| `spine_restore_backup` | 把写前备份恢复回 `.spine` 工程，需 `overwrite:true`，恢复前再备份当前目标 | 否 |
+| `spine_diff_animations` | 只读对比两份 skeleton JSON 的动画与事件定义差异 | 否 |
+| `spine_merge_animations` | 把 donor 的动画合并进 base 的副本，自动补齐事件定义 | 否 |
+| `spine_manage_events` | 事件定义独立管理：`list` / `add` / `remove` / `rename` | 否 |
+| `spine_build_batch_animations` | 多 skeleton 批量生成同名动画副本，单个失败不影响其它 | 否 |
+
+## 写操作与人工重载（P0）
+
+- 按项目约定，**不做自动重载**。所有会写 `.spine` 的工具（`spine_clean`、`spine_import_json`，以及 `spine_export` 的 `clean:true`）在成功后返回 `requiresManualReload: true` 与 `reloadHint`，提示在编辑器里手动 `Ctrl+O`；失败时不附加，避免误导。
+- `spine_build_combat_animation` 写的是 JSON 副本，返回 `nextStep`，提示手动 `File → Import Data` 导入，不自动重载工程。
+- `spine_make_export_settings` 只生成设置文件，不改 `.spine`；已验证并开放 `export-json` 与 `export-binary`，图片 / 视频格式未验证故不开放，不猜格式。`settings.output` 会被 `spine_export` 的 `outputDir` 覆盖。
+- `spine_project_info` 封装官方 `-i` Info 模式，只读；`parsed` 含 `spineVersion` / `dopesheetFps` / `skeletons`（骨骼、插槽、动画列表），解析不出来时为 `null`，原始 `stdout` 始终保留。
+
+## P1：写前备份、多格式导出与产物校验
+
+- **实测结论**：`spine_clean`（`-i -m`）会**原地改写** `.spine`（副本 10750 → 7994 字节、哈希变化），`spine_import_json`（`-r`）会生成新的 `.spine`，两者 exitCode 均为 0；官方 `-i` Info 也能直接读导出的 skeleton 数据文件（`Project info: null`，但骨骼 / 插槽 / 动画列表完整）。
+- **写前备份**：`spine_clean` 默认 `backup: true`；`spine_import_json` 在 `overwrite: true`、`spine_export` 在 `clean: true` 时默认备份。备份落到系统临时目录 `spine-mcp-backups/`，不污染工程目录与 git 工作区，返回 `backupPath` / `backupHint`；显式 `backup: false` 可关闭。
+- **多格式导出**：`spine_make_export_settings` 的 `format` 支持 `json` / `binary`，两种设置都已在副本上真实导出验证；图片 / 视频格式未验证，不开放。
+- **`spine_verify_export`**：对源工程与导出目录里每个 `.json` 产物分别跑官方 `-i` Info，按 skeleton 名比对 `bones` / `slots` / `animations` 列表，返回 `ok` / `matched` / `missing` / `mismatches`。只读，但会多次启动 CLI，较慢。
+- **批量导出**：`spine_export` 的 `extraInputs` 可追加多组 `-i/-e`；实测一次调用里混合 JSON 与 Binary 导出成功（exit 0）。
+- 写操作成功后仍统一返回 `requiresManualReload` + `reloadHint`（手动 Ctrl+O），不自动重载。
+- 尚未做：图片 / 视频导出设置、产物二进制内容级比对（当前只比结构）。
+
+## P2：图集能力与备份回滚
+
+- **实测（3.8.75）**：`-i <images> -o <out> -p <name>` 打包成功（产出 `.atlas` + `.png`）；带 `-n <name> -p <pack.json>` 的设置文件形式成功；`-i <atlas images> -o <out> -c <file.atlas>` 解包成功（还原出 7 张 PNG）；`-i <另一个 .spine> -o <新 .spine> -r` 导入工程 skeleton 成功。
+- `spine_pack_atlas` 封装两种 pack 形式，可选 `projectPaths`（多个 `-j`，用于 mesh 判断哪些图片被用到）；`spine_unpack_atlas` 封装 `-c`。两者只写 `outputDir`，不碰源图片目录。
+- `-r` 的工程输入**不需要新工具**：现有 `spine_import_json` 的 `inputPath` 直接传 `.spine` 即可，工具描述已注明。
+- `spine_restore_backup` 补齐 P1 备份的闭环：恢复会覆盖目标，必须显式 `overwrite:true`；恢复前自动把当前目标再备份一次（返回 `preRestoreBackup`），成功后返回 `requiresManualReload` + `reloadHint`（手动 Ctrl+O）。
+## P3：动画工作流（纯 JSON 层）
+
+- 全部为**离线纯逻辑**，不调用 Spine CLI、不碰 GUI、不写源文件；实现集中在 `src/animation-ops.mjs`。
+- `spine_diff_animations`：对比两份 skeleton JSON，返回动画的 `added` / `removed` / `changed` / `unchanged`（附关键帧数与事件数）与顶层 `events` 定义差异；序列化时按键排序，避免属性顺序造成误报。
+- `spine_merge_animations`：把 donor 动画合并到 base 副本，默认跳过同名（`overwrite:true` 才覆盖），并自动把 donor 的事件定义补到副本里；可用 `animationNames` 只挑指定动画。
+- `spine_manage_events`：`list` 只读（列出定义及被哪些动画引用）；`add` / `remove` / `rename` 写副本，rename 会同步改写所有动画里的事件名，remove 会警告仍在引用该事件的动画。
+- `spine_build_batch_animations`：对多个导出的 skeleton JSON 各生成一条同名动画副本，支持 `boneControlsBySkeleton` 分别指定骨骼、`skipMissingBones` 自动过滤各 skeleton 不存在的骨骼；单个失败只记入 `failures`，不影响其它。
+- 这四个工具写的都是 JSON 副本，统一返回 `nextStep`，提示手动 `File → Import Data`；**不自动重载工程**。
+- **仍有意排除**：图片 / 视频导出设置（格式未验证，不猜）、产物二进制内容级比对、任何 GUI 自动化。
 
 ## 与 GUI 联动（方案 C）
 
@@ -152,5 +196,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、网格绑定、骨骼权重、IK 创建。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（副本真实导出，exitCode 0，产出 `citizen_001.json` / `skeleton.json`），以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；**`spine_import_json` / `spine_clean` 仍未验证**（两者会写 `.spine` 工程）。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成由离线单测覆盖；**未验证**：图片 / 视频导出设置（格式未验证，不开放）、产物二进制内容级比对。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。
