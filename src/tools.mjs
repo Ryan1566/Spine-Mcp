@@ -15,6 +15,7 @@ import {
   frameTable,
   validateAnimation,
 } from './timeline.mjs';
+import { requestGuiReload } from './gui-link.mjs';
 
 const frameRef = { type: 'integer', minimum: 1, description: '1-based 帧号' };
 const eventFrameSchema = {
@@ -175,6 +176,20 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'spine_reload_gui',
+    description: '方案 C：CLI 改写工程后，请求 Spine GUI 重新打开该工程。走官方 Editor 模式（Spine.exe <工程路径>），不模拟鼠标键盘、不改动工程文件。Spine 3.8.75 有单实例锁：检测到已有 GUI 时默认阻止启动并返回可选做法；dryRun=true 只返回计划。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: '要重新打开的 .spine 工程绝对路径（必须存在）' },
+        dryRun: { type: 'boolean', description: '默认 false；true 时只返回将要执行的命令与参数，不启动 GUI' },
+        allowWhenRunning: { type: 'boolean', description: '默认 false；已有 GUI 实例时仍强制尝试启动（通常会被单实例锁拒绝）' },
+      },
+      required: ['projectPath'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function readJson(jsonPath) {
@@ -286,6 +301,14 @@ export async function callTool(name, args = {}) {
 
     case 'spine_clean': {
       return runSpine(cleanArgs({ inputPath: args.inputPath }));
+    }
+
+    case 'spine_reload_gui': {
+      return requestGuiReload({
+        projectPath: args.projectPath,
+        dryRun: args.dryRun === true,
+        allowWhenRunning: args.allowWhenRunning === true,
+      });
     }
 
     default:

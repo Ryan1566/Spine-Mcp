@@ -1,7 +1,9 @@
 // stdio 传输：stdin 每行一条 JSON-RPC 消息，stdout 只输出合法 MCP 消息，日志一律走 stderr。
 import fs from 'node:fs';
 import readline from 'node:readline';
+import { recordRuntime } from './build-info.mjs';
 import { handle, SERVER_INFO } from './server.mjs';
+import { TOOLS } from './tools.mjs';
 
 const log = (...parts) => {
   process.stderr.write(`[${SERVER_INFO.name}] ${parts.join(' ')}\n`);
@@ -56,4 +58,9 @@ rl.on('close', () => {
 });
 
 process.on('uncaughtException', (err) => log('uncaught:', err?.message ?? String(err)));
-log('ready, pid=', process.pid, 'node=', process.version);
+// 启动即落一份指纹，供 scripts/check-update.mjs 判断「磁盘已更新、进程还是旧的」。
+const runtime = recordRuntime({
+  toolCount: TOOLS.length,
+  toolNames: TOOLS.map((tool) => tool.name),
+});
+log('ready, pid=', process.pid, 'node=', process.version, 'src=', runtime.sourceHash);

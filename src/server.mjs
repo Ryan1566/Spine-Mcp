@@ -1,7 +1,22 @@
 // 零依赖 MCP 协议层，dual-era：
 //  - legacy（2025-11-25 及更早）：initialize 握手 + tools/list + tools/call
 //  - modern（2026-07-28）：每请求 _meta 版本 + server/discover（无握手）
+import { currentRuntime } from './build-info.mjs';
 import { TOOLS, callTool } from './tools.mjs';
+
+// spine_doctor 会带上这份指纹：MCP 进程是宿主 spawn 的，代码停留在启动那一刻，
+// 磁盘上被 WorkBuddy 改过之后它不会自动升级 —— 用它能立刻看出「跑的是旧版」。
+function runtimeStamp() {
+  const runtime = currentRuntime();
+  return {
+    pid: runtime.pid,
+    startedAt: runtime.startedAt,
+    sourceHash: runtime.sourceHash,
+    fileCount: runtime.fileCount,
+    toolCount: TOOLS.length,
+    checkCommand: 'node D:/Spine-Mcp/scripts/check-update.mjs',
+  };
+}
 
 export const SERVER_INFO = { name: 'spine-mcp-local', version: '0.1.0' };
 export const MODERN_VERSIONS = ['2026-07-28'];
@@ -61,7 +76,8 @@ async function toolsCall(id, params) {
     return rpcError(id, -32602, 'tools/call 的 arguments 必须是对象');
   }
   try {
-    const result = await callTool(name, args);
+    const raw = await callTool(name, args);
+    const result = name === 'spine_doctor' && raw && typeof raw === 'object' ? { ...raw, build: runtimeStamp() } : raw;
     return ok(id, {
       resultType: 'complete',
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

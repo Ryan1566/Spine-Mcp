@@ -35,6 +35,8 @@ function runServer(messages) {
 }
 
 const byId = (responses, id) => responses.find((r) => r.id === id);
+// 新增工具时只改这里一处；responses.length / rows.length 的 8 是请求数与帧数，别混。
+const EXPECTED_TOOLS = 9;
 
 test('stdio 双时代协议握手与工具调用', async () => {
   const { responses, stderr, code } = await runServer([
@@ -58,7 +60,7 @@ test('stdio 双时代协议握手与工具调用', async () => {
   assert.equal(init.serverInfo.name, 'spine-mcp-local');
 
   const tools = byId(responses, 2).result.tools;
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, EXPECTED_TOOLS);
   // 2026-07-28 的 CacheableResult 强制校验这两个字段，DSH 缺了会整段工具同步失败。
   assert.equal(byId(responses, 2).result.ttlMs, 0);
   assert.equal(byId(responses, 2).result.cacheScope, 'private');
@@ -78,7 +80,7 @@ test('stdio 双时代协议握手与工具调用', async () => {
   assert.equal(discover.ttlMs, 0);
   assert.equal(discover.cacheScope, 'private');
 
-  assert.equal(byId(responses, 5).result.tools.length, 8);
+  assert.equal(byId(responses, 5).result.tools.length, EXPECTED_TOOLS);
   assert.equal(byId(responses, 6).error.code, -32022);
   assert.deepEqual(byId(responses, 6).error.data.supported, ['2026-07-28']);
   assert.equal(byId(responses, 7).error.code, -32601);
@@ -100,8 +102,8 @@ test('旧时代客户端在 _meta 回显协商版本时不应被拒', async () =
     { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-06-18' }, name: 'spine_frames_to_seconds', arguments: { fps: 24, frames: 24 } } },
   ]);
   assert.equal(responses.length, 4);
-  assert.equal(byId(responses, 2).result.tools.length, 8);
-  assert.equal(byId(responses, 3).result.tools.length, 8);
+  assert.equal(byId(responses, 2).result.tools.length, EXPECTED_TOOLS);
+  assert.equal(byId(responses, 3).result.tools.length, EXPECTED_TOOLS);
   const call = byId(responses, 4).result;
   assert.equal(call.isError, false);
   assert.equal(call.structuredContent.durationSec, 1);

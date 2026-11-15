@@ -1,3 +1,5 @@
 
 .workbuddy/memory
 dsh-spine-mcp.patch.yml
+# 运行实例指纹（每个 MCP 进程启动时写一份，机器相关，不入库）
+.runtime/
