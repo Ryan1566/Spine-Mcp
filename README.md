@@ -10,7 +10,7 @@
 | 协议 | **dual-era**：legacy `initialize` + modern `server/discover` / `_meta` 版本 | 仅旧握手 |
 | 帧规格 | 内置「N 帧 @ fps → Spine 秒 + 事件帧」换算与生成 | 无 |
 | 写文件 | 只写副本，源文件永不改动；覆盖必须显式 `overwrite` | 支持原地导回 |
-| 工具量 | 21 个 | 55 / 70 个 |
+| 工具量 | 22 个 | 55 / 70 个 |
 
 ## 硬前提（做不到就别装）
 
@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 21 个工具
+## 22 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -82,6 +82,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_manage_events` | 事件定义独立管理：`list` / `add` / `remove` / `rename` | 否 |
 | `spine_build_batch_animations` | 多 skeleton 批量生成同名动画副本，单个失败不影响其它 | 否 |
 | `spine_modify_bones` | 在 JSON 副本上改骨骼结构 / setup pose：`list`/`add`/`remove`/`rename`/`reparent`/`set` | 否 |
+| `spine_edit_weights` | 网格权重数值层：`inspect` 校验 / `normalize` 归一化 / `scale` 按骨骼缩放 | 否 |
 
 ## 写操作与人工重载（P0）
 
@@ -122,7 +123,12 @@ node scripts/check-update.mjs      # 等价 npm run check
 - `list`（只读）按数组下标列出骨骼名、父级与 setup pose 字段；`add` 追加新骨骼（校验重名 / 父级存在 / 字段类型，**追加到末尾**，不打乱已有下标）；`set` 改 `x/y/rotation/scaleX/scaleY/shearX/shearY/length/color/transform` 等白名单字段；`rename` 同步改写 `parent`、`slots[].bone`、`animations[*].bones` 键、`ik[].bones/target`；`reparent` 改父级并检测循环；`remove` 默认拒绝任何仍被引用的骨骼。
 - **为什么删除受限**：3.8.75 的 mesh 权重编码在 `vertices` 里、用 `bones` 数组下标引用骨骼（官方示例 `raptor-pro.json` 实测为 `[boneCount, boneIndex, x, y, weight, ...]`）。删中间骨骼会让所有权重错位，所以工程含加权 mesh 时**一律拒绝删除**，请改用 `rename` / `set` 或在编辑器里处理蒙皮。
 - `remove` 的 `reparentChildren` / `dropAnimationTracks` 可自动重接子骨骼、清理动画时间轴；插槽与 IK 引用仍一律拒绝删除。
-- **仍做不到**：在编辑器里刷权重、创建/编辑 mesh 封套、实时拖骨骼与预览形变（GUI 交互，按约定不做自动化）。权重数值本身在 JSON 里是可表达的，未来可另加只读校验 / 归一化工具。
+## P4b：网格权重数值（纯 JSON 层）
+
+- **格式实测**：3.8.75 带权重的 mesh 把数据编码在 `vertices`：`[boneCount, boneIndex, x, y, weight, ...]`；未加权 mesh 是纯 `[x, y, ...]`（`vertices.length === uvs.length`）。官方示例 305 个 mesh 均无 `bones` 局部映射字段，`boneIndex` 直接是 `skeleton.bones` 下标（实现仍兼容 `att.bones` 旧写法）。
+- `spine_edit_weights` 三种模式：`inspect` 只读（加权 mesh 数、顶点数、权重和偏离 1 的顶点、无效骨骼下标、每根骨骼的权重汇总）；`normalize` 把每个顶点权重归一到和 = 1；`scale` 按骨骼名 / 下标把该骨骼的权重乘以 `factor`，再逐顶点归一化。
+- 只改 `weight` 数值，**不动顶点坐标、骨骼归属、`att.bones` 映射、骨骼数量**；写 JSON 副本并返回 `nextStep`（手动 Import Data）。
+- **仍做不到**：在编辑器里刷权重、创建 / 编辑 mesh 封套、实时拖骨骼与预览形变（GUI 交互，按约定不做自动化）。数值层能改权重，但改完必须 `spine_import_json` 导回并在编辑器里人工复核形变。
 
 ## 与 GUI 联动（方案 C）
 
@@ -203,7 +209,7 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 ## 能力边界（如实列出）
 
-- 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、网格 / 封套编辑、刷权重、IK 约束创建、预览渲染。骨骼**结构与 setup pose 的数值**可通过 `spine_modify_bones` 在 JSON 副本上修改（P4），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
+- 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、IK 约束创建、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）都可在 JSON 副本上修改（P4 / P4b），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成与 P4 的骨骼修改均由离线单测覆盖；**未验证**：图片 / 视频导出设置（格式未验证，不开放）、产物二进制内容级比对。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改与 P4b 的权重数值均由离线单测覆盖；**未验证**：图片 / 视频导出设置（格式未验证，不开放）、产物二进制内容级比对。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。

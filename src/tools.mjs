@@ -25,6 +25,7 @@ import { packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
 import { modifyBones } from './bone-ops.mjs';
+import { editWeights } from './weight-ops.mjs';
 
 // 写 JSON 副本（而非 .spine）的工具统一提示人工 Import Data，不自动重载工程。
 const NEXT_STEP_IMPORT = '若要在 Spine 编辑器里查看，请手动 File → Import Data 导入这个 JSON 副本（不自动重载工程）。';
@@ -414,6 +415,23 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'spine_edit_weights',
+    description: '3.8.75 网格权重数值层：`inspect` 只读校验（权重和 / 骨骼下标 / 每骨骼权重汇总）、`normalize` 归一化、`scale` 按骨骼批量缩放后归一化。只写 JSON 副本，不改顶点坐标与骨骼归属。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径' },
+        outputJsonPath: { type: 'string', description: 'inspect 模式可省略；其余模式必填' },
+        mode: { type: 'string', enum: ['inspect', 'normalize', 'scale'], description: '默认 inspect' },
+        bone: { type: ['string', 'integer'], description: 'scale 模式必填：骨骼名或全局下标' },
+        factor: { type: 'number', exclusiveMinimum: 0, description: 'scale 模式的权重倍率，如 0.8 / 1.2' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+      },
+      required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function readJson(jsonPath) {
@@ -681,6 +699,21 @@ export async function callTool(name, args = {}) {
       });
       if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, bones };
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
+      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
+      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+    }
+
+    case 'spine_edit_weights': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const mode = args.mode ?? 'inspect';
+      const { report, json, summary } = editWeights(skeleton, {
+        mode,
+        bone: args.bone,
+        factor: args.factor,
+      });
+      if (mode === 'inspect') return { sourceJsonPath: args.sourceJsonPath, ...report };
+      if (!args.outputJsonPath) throw new Error('非 inspect 模式必须提供 outputJsonPath');
       const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
       await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
       return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
