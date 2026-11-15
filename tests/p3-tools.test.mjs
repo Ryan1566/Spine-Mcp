@@ -130,7 +130,7 @@ test('stdio 集成：P3 四个工具可用且只写副本', async () => {
       { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'spine_merge_animations', arguments: { baseJsonPath: heroPath, donorJsonPath: demoPath, outputJsonPath: mergedPath } } },
       { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'spine_build_batch_animations', arguments: { sourceJsonPaths: [heroPath, demoPath], outputDir: dir, animationName: 'p3_attack', fps: 12, frames: 8, skipMissingBones: true } } },
     ]);
-    assert.equal(responses.find((r) => r.id === 1).result.tools.length, 20);
+    assert.equal(responses.find((r) => r.id === 1).result.tools.length, TOOLS.length);
     const diff = responses.find((r) => r.id === 2).result;
     assert.equal(diff.isError, false);
     assert.equal(diff.structuredContent.identical, true);

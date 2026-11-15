@@ -118,9 +118,9 @@ test('重载约定：提示文案固化在代码里，且只在成功时附加',
   assert.match(ok.reloadHint, /Ctrl\+O/);
 });
 
-test('工具表：20 个工具，P0/P1/P2/P3 新工具已注册', () => {
-  assert.equal(TOOLS.length, 20);
-  for (const name of ['spine_project_info', 'spine_version', 'spine_make_export_settings', 'spine_verify_export', 'spine_pack_atlas', 'spine_unpack_atlas', 'spine_restore_backup', 'spine_diff_animations', 'spine_merge_animations', 'spine_manage_events', 'spine_build_batch_animations']) {
+test('工具表：21 个工具，P0/P1/P2/P3/P4 新工具已注册', () => {
+  assert.equal(TOOLS.length, 21);
+  for (const name of ['spine_project_info', 'spine_version', 'spine_make_export_settings', 'spine_verify_export', 'spine_pack_atlas', 'spine_unpack_atlas', 'spine_restore_backup', 'spine_diff_animations', 'spine_merge_animations', 'spine_manage_events', 'spine_build_batch_animations', 'spine_modify_bones']) {
     assert.ok(TOOLS.some((t) => t.name === name), `缺少 ${name}`);
   }
   assert.ok(TOOLS.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
@@ -135,7 +135,7 @@ test('stdio 集成：新工具可见，生成设置文件不依赖 Spine', async
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'spine_make_export_settings', arguments: { outputPath: target } } },
       { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'spine_project_info', arguments: { inputPath: path.join(here, 'nope.spine') } } },
     ]);
-    assert.equal(responses.find((r) => r.id === 1).result.tools.length, 20);
+    assert.equal(responses.find((r) => r.id === 1).result.tools.length, TOOLS.length);
     const made = responses.find((r) => r.id === 2).result;
     assert.equal(made.isError, false);
     assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).class, 'export-json');

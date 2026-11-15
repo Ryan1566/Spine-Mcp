@@ -1,5 +1,5 @@
 // 生成 3.8.75 的导出设置 JSON（spine_export 的 -e 参数要求文件真实存在）。
-// 目前只有 export-json 在本机端到端验证过；其它格式留到 P1 验证后再开放，不猜格式。
+// export-json 与 export-binary 都已在本机端到端验证；图片 / 视频格式未验证，不开放、不猜格式。
 import fs from 'node:fs/promises';
 import { assertWritableOutput } from './spine-cli.mjs';
 

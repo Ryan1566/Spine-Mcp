@@ -24,6 +24,7 @@ import { verifyExport } from './verify-export.mjs';
 import { packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
+import { modifyBones } from './bone-ops.mjs';
 
 // 写 JSON 副本（而非 .spine）的工具统一提示人工 Import Data，不自动重载工程。
 const NEXT_STEP_IMPORT = '若要在 Spine 编辑器里查看，请手动 File → Import Data 导入这个 JSON 副本（不自动重载工程）。';
@@ -236,7 +237,7 @@ export const TOOLS = [
   },
   {
     name: 'spine_make_export_settings',
-    description: '生成 3.8.75 导出设置 JSON（供 spine_export 的 -e 使用）。当前仅支持已验证的 json 格式；binary / 图片 / 视频待 P1 验证。',
+    description: '生成 3.8.75 导出设置 JSON（供 spine_export 的 -e 使用）。`json` / `binary` 均已在本机验证；图片 / 视频格式未验证，不开放。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -380,6 +381,36 @@ export const TOOLS = [
         overwrite: { type: 'boolean', description: '输出文件已存在时是否覆盖，默认 false' },
       },
       required: ['sourceJsonPaths', 'outputDir', 'animationName', 'fps', 'frames'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_modify_bones',
+    description: '在导出的 skeleton JSON 副本上修改骨骼：`list` 只读 / `add` / `remove` / `rename` / `reparent` / `set`（setup pose）。不写 `.spine`、不碰 GUI；含加权 mesh 的工程拒绝删除骨骼。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径' },
+        outputJsonPath: { type: 'string', description: 'list 模式可省略；其余模式必填' },
+        mode: { type: 'string', enum: ['list', 'add', 'remove', 'rename', 'reparent', 'set'], description: '默认 list' },
+        bones: { type: 'array', items: {}, description: 'add: 骨骼定义数组；remove: 骨骼名数组；set: { name, ...字段 } 数组' },
+        rename: {
+          type: 'object',
+          properties: { from: { type: 'string' }, to: { type: 'string' } },
+          required: ['from', 'to'],
+          additionalProperties: false,
+        },
+        reparent: {
+          type: 'object',
+          properties: { name: { type: 'string' }, parent: { type: 'string' } },
+          required: ['name', 'parent'],
+          additionalProperties: false,
+        },
+        reparentChildren: { type: 'boolean', description: 'remove 时自动把子骨骼接到被删骨骼的父级，默认 false' },
+        dropAnimationTracks: { type: 'boolean', description: 'remove 时自动删除引用该骨骼的动画时间轴，默认 false' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+      },
+      required: ['sourceJsonPath'],
       additionalProperties: false,
     },
   },
@@ -635,6 +666,24 @@ export async function callTool(name, args = {}) {
         written.push({ file: out, skeleton: item.name, ...item.summary });
       }
       return { outputDir: args.outputDir, written, failures, nextStep: NEXT_STEP_IMPORT };
+    }
+
+    case 'spine_modify_bones': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const mode = args.mode ?? 'list';
+      const { json, summary, bones } = modifyBones(skeleton, {
+        mode,
+        bones: args.bones ?? [],
+        rename: args.rename,
+        reparent: args.reparent,
+        reparentChildren: args.reparentChildren === true,
+        dropAnimationTracks: args.dropAnimationTracks === true,
+      });
+      if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, bones };
+      if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
+      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
+      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
+      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
     }
 
     default:

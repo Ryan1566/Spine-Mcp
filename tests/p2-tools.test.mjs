@@ -73,7 +73,7 @@ test('restoreBackup：覆盖保护、恢复内容、恢复前再备份与重载�
 });
 
 test('工具表：P2/P3 工具已注册', () => {
-  assert.equal(TOOLS.length, 20);
+  assert.ok(TOOLS.length >= 21);
   for (const name of ['spine_pack_atlas', 'spine_unpack_atlas', 'spine_restore_backup']) {
     assert.ok(TOOLS.some((t) => t.name === name), `缺少 ${name}`);
   }
