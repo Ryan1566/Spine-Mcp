@@ -46,7 +46,7 @@ function auditAnimationReferences(skeleton, animationName, animation, add) {
 
   for (const [category, names, label] of [
     ['bones', bones, '骨骼'], ['slots', slots, '插槽'], ['ik', ik, 'IK 约束'],
-    ['transform', transform, 'Transform 约束'], ['paths', paths, 'Path 约束'],
+    ['transform', transform, 'Transform 约束'], ['path', paths, 'Path 约束'],
   ]) {
     for (const target of Object.keys(animation?.[category] ?? {})) {
       if (!names.has(target)) add('error', 'animation.reference', `动画 ${animationName} 引用了不存在的${label}: ${target}`, { animationName, category, target });

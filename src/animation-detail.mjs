@@ -22,9 +22,18 @@ function* timelineEntries(animation) {
     if (!Array.isArray(keys) || !keys.every(hasTime)) continue;
     yield { category: 'animation', target: null, type, keys, assign: (value) => { animation[type] = value; } };
   }
-  // bones / slots / ik / transform / paths：target -> timeline -> keys。
-  for (const category of ['bones', 'slots', 'ik', 'transform', 'paths']) {
+  // bones / slots / ik / transform / path：target -> timeline -> keys。
+  // 注意 path 约束的键名是单数 path，值是 { position: [...], mix: [...] } 的嵌套对象。
+  // ik / transform 的约束时间线却是**直接一个关键帧数组**，没有中间通道层，必须单独认。
+  for (const category of ['bones', 'slots', 'ik', 'transform', 'path']) {
     for (const [target, timelines] of Object.entries(animation?.[category] ?? {})) {
+      if (Array.isArray(timelines) && timelines.every(hasTime)) {
+        yield {
+          category, target, type: 'default', keys: timelines,
+          assign: (value) => { animation[category][target] = value; },
+        };
+        continue;
+      }
       for (const [type, keys] of Object.entries(timelines ?? {})) {
         if (!Array.isArray(keys) || !keys.every(hasTime)) continue;
         yield { category, target, type, keys, assign: (value) => { animation[category][target][type] = value; } };
@@ -101,7 +110,7 @@ export function inspectAnimation(skeleton, animationName, { includeKeyframes = t
       slots: Object.keys(animation.slots ?? {}).length,
       ik: Object.keys(animation.ik ?? {}).length,
       transform: Object.keys(animation.transform ?? {}).length,
-      paths: Object.keys(animation.paths ?? {}).length,
+      paths: Object.keys(animation.path ?? {}).length,
       deformSkins: Object.keys(animation.deform ?? {}).length,
       events: (animation.events ?? []).length,
       drawOrder: (animation.drawOrder ?? animation.draworder ?? []).length,

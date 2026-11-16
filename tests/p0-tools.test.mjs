@@ -119,8 +119,8 @@ test('重载约定：提示文案固化在代码里，且只在成功时附加',
   assert.match(ok.reloadHint, /Ctrl\+O/);
 });
 
-test('工具表：38 个工具，P0-P15 新工具已注册', () => {
-  assert.equal(TOOLS.length, 38);
+test('工具表：40 个工具，P0-P16 新工具已注册', () => {
+  assert.equal(TOOLS.length, 40);
   for (const name of ['spine_project_info', 'spine_version', 'spine_make_export_settings', 'spine_verify_export', 'spine_pack_atlas', 'spine_unpack_atlas', 'spine_restore_backup', 'spine_diff_animations', 'spine_merge_animations', 'spine_manage_events', 'spine_build_batch_animations', 'spine_modify_bones', 'spine_edit_weights', 'spine_audit_project', 'spine_inspect_animation', 'spine_edit_animation', 'spine_edit_slots', 'spine_edit_skins', 'spine_inspect_constraints', 'spine_edit_constraints', 'spine_inspect_atlas', 'spine_audit_assets', 'spine_export_workflow', 'spine_list_backups', 'spine_inspect_skel', 'spine_inspect_mesh', 'spine_render_preview', 'spine_get_wireframe', 'spine_align_check']) {
     assert.ok(TOOLS.some((t) => t.name === name), `缺少 ${name}`);
   }

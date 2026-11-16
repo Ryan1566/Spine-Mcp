@@ -414,7 +414,7 @@ test('工具表：两个 P15 工具已注册且必填项正确', () => {
   assert.deepEqual(wire.inputSchema.required, ['jsonPath']);
   assert.deepEqual(align.inputSchema.required, ['jsonPath', 'renderPng']);
   assert.deepEqual(wire.inputSchema.properties.format.enum, ['summary', 'svg', 'html']);
-  assert.equal(TOOLS.length, 38);
+  assert.equal(TOOLS.length, 40);
 });
 
 function round(n) {

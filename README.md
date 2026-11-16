@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 38 个工具
+## 40 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -95,6 +95,8 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_edit_skins` | 皮肤副本：新增 / 删除 / 改名 / 按插槽分配附件 | 否 |
 | `spine_inspect_constraints` | 只读检查 IK / transform / path 约束与动画使用 | 否 |
 | `spine_edit_constraints` | 约束副本：新增 / 删除（引用保护）/ 改名（同步动画轨道）/ 改参数 | 否 |
+| `spine_animate_constraint` | 给约束打帧（ik / transform / path），字段按 3.8.75 实测白名单过滤 | 否 |
+| `spine_solve_constraints` | 诊断约束求解：IK 末端到 target 的收敛、order 冲突、约束是否真的生效 | 否 |
 | `spine_inspect_atlas` | 只读解析 .atlas：页面、region、重叠、越界、缺图 | 否 |
 | `spine_audit_assets` | 审计 skeleton 附件与图集 / 散图的对应关系 | 否 |
 | `spine_export_workflow` | 批量导出工作流：多工程 × 多格式矩阵、自动生成设置、可选图集打包、统一产物报告、可选校验、dryRun | 是 |
@@ -412,11 +414,59 @@ IoU 是关键——命中率只能证明「落在轮廓里」，IoU 能区分「
 ### 当前没做的（会明确写进 warnings）
 
 - **deform 时间线**：检测到就告警，但**不参与**顶点位移计算，所以变形动画的线框会和渲染有偏差。
-- **IK / transform / path 约束**：不求解，受约束骨骼按原始层级算。工程里有这类约束时 `warnings` 会点名。
+- **path 约束**：3.8 的 path 约束要 path 附件的贝塞尔几何，采样引擎不构建它，所以路径上的骨骼位置仍按层级算（IK / transform 已在 P16 求解）。
 - **inherit 非 normal**（`onlyTranslation` / `noScale` 等）：按 normal 算并告警。
 - **drawOrder**：只影响绘制顺序，不影响几何，直接忽略。
 
-`npm test` **146/146**（新增 `tests/p15-pose.test.mjs` 27 例：时间线采样与三种缓动、偏移语义、世界变换累乘、region 裁剪、附件时间线、不改源 JSON、SVG 结构、自写 PNG 编解码、投影与 IoU）。
+`npm test` **178/178**（P15 的 `tests/p15-pose.test.mjs` 27 例覆盖时间线采样、世界变换累乘、region 裁剪与 IoU；P16 的 `tests/p16-constraint.test.mjs` 30 例覆盖约束求解与打帧）。
+
+## P16：约束求解与约束打帧（3.8.75 的「动态约束」到底是什么）
+
+先回答版本问题：**3.8.75 没有物理（physics）约束**，那是 4.2+ 才有的东西——把 `"physics": [...]` 写进 JSON 导入不报错，但导出时被**静默丢弃**（三处独立验证：另一个工程、IK 对照工程、官方 14 个示例）。3.8 只有 `ik` / `transform` / `path` 三类。
+
+但「运行时动态变化」这件事 3.8 是支持的，只是它是**参数驱动**：三类约束的 mix / position 都能被动画打帧。所以 P16 做两件事——把约束按 3.8 语义**求解**进采样引擎，再把「给约束打帧」做成工具。
+
+### 求解：IK / transform 已接入采样
+
+`spine_get_wireframe` / `spine_align_check` 返回的 scene 现在带 `constraints` 报告，逐条给出该时刻的 `values` / `before` / `after` / `changedBones` / `movedBones`。语义上踩过的点：
+
+- **约束按 `order` 升序求解**，同 order 保持定义顺序；每解完一条必须重算受影响骨骼的**整棵子树** world 变换，否则「骨头动了肉没动」。
+- **IK 追的是 target 骨骼的世界原点**，不是骨骼末端。两骨链用余弦定理；单骨只转骨轴（骨比距离长就会伸过头，属正常行为，不是解错）。
+- **IK 只按前两根骨骼求解**，多骨链会告警并说明其余被忽略。
+- **`transform` 的四个 mix 默认值都是 1**：官方 `alien` 的 `eye` 约束只写了 `x/y` 偏移没写 mix，`death` 动画里显式打 0 才能关掉它——证明不写 = 全量生效。
+- **世界剪切 = Y 轴角 − X 轴角 − 90**。这里踩过一个真坑：早期写成 `atan2(t.c,t.a)+90-worldRotation(t)`，两项恒抵消成 90°，会把骨骼 `shearY` 顶到 90° 并拖歪整棵子树（alien 的 `eye-root → eye`，`eye` 世界 x 从 51.29 变成 -185.67）。
+
+验证不靠肉眼也不靠渲染：官方 `raptor` 有 9 条 IK，沿 5 个动画、41 个时间点扫一遍，**臂展内的约束末端误差 ≤ 0.8 单位**（骨架跨度约 1100），关掉求解时同批约束最大偏差 474 单位。`transform` 用 `alien` 的 3 条约束验证：setup 姿态下 rotateErr / posErr / 缩放比 / 剪切误差**全部 0.000**，`death` 动画把 mix 打到 0 时位移正好归零。
+
+### 打帧：`spine_animate_constraint`
+
+字段白名单是**实测**出来的（写进 JSON → `-r` 导入 `.spine` → 再导出 JSON，看谁活下来），不是照抄文档：
+
+| 约束 | 时间线位置 | 能打帧的字段 | 被丢掉的字段 |
+|---|---|---|---|
+| `ik` | `animations.<动画>.ik.<约束名>`，**数组** | `mix`、`bendPositive` | `softness` |
+| `transform` | `animations.<动画>.transform.<约束名>`，**数组** | `rotateMix`、`translateMix`、`scaleMix`、`shearMix` | `rotation` / `x` / `y` 等偏移 |
+| `path` | `animations.<动画>.path.<约束名>`，**对象**，分两通道 | `position` 通道 → `position`；`mix` 通道 → `rotateMix` / `translateMix` | `spacing` |
+
+白名单外的字段直接报错（错误里列出可用字段），不会写出导不回去的 JSON。省略的字段按 3.8 默认值处理，因此不会落到文件里。
+
+`curve` 支持 `"stepped"` / 数字 cx1 / 4 元数组（内部翻译成 3.8 原生的 `curve` + `c2/c3/c4`）。但 **`transform` 约束时间线写 `"stepped"` 会让 3.8 导入抛 `ArrayIndexOutOfBoundsException: 19`**，整份骨架都进不去——这条已做成硬拒绝。
+
+端到端往返实测（工具写出 → `-r` 导入 → 导出 JSON）：`transform` 四个 mix、`path` 的 mix 通道合并（保留原有帧 + 新增帧）、`ik` 的 mix 与贝塞尔，全部原样保留。
+
+### 诊断：`spine_solve_constraints`
+
+沿动画时间线采样，逐条回报生效次数 / 位移骨骼数 / 该时刻的动画字段 / 该类型能打帧的字段。判定项：
+
+- `ik.not-reached`：目标在臂展内但末端没闭合（求解读不对才会出现）。
+- `ik.axis-off`：单骨 IK 的骨轴偏离 target。
+- `ik.out-of-reach`：target 一直在臂展外（链恒为完全伸展，正常但值得知道）。
+- `ik.mix-never-full`：mix 从没到 1（末端本来就贴不上，属预期，不报错）。
+- `constraint.order-collision`：同 order 且骨骼链有交集，结果依赖定义顺序。
+- `ik.no-effect` / `transform.no-effect`：全程没产生位移（最常见是 mix 被动画打成 0）。
+- `path.unsolved`：path 约束未参与求解。
+
+用法：`spine_solve_constraints { jsonPath, animationName: "walk" }` 看整条动画的收敛情况；`solve:false` 作为「不求解」基线做对比。
 
 
 ## 与 GUI 联动（方案 C）
@@ -489,6 +539,12 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 - 路径正确仍失败时，先手动跑 `& "$env:SPINE_EXE" --help`，对照 MCP 返回的 `command` / `args`；不同 Spine 版本的参数与设置 JSON 格式不通用。
 - launcher 每次会联网拉 welcome data，常报 `WARNING: Welcome data download failed, server error: 410`；这是 3.8.75 服务端接口下线的正常噪声，CLI 仍会正常完成（exitCode 0），不影响导出结果。
 - 3.8.75 与 4.x 的 skeleton JSON 不通用，别混用。
+- **没有 physics 约束**：`"physics": [...]` 写进 JSON 导入不报错，导出时被**静默丢弃**。3.8 只有 `ik` / `transform` / `path`。
+- **`bones[].parent` 是名字字符串**，不是下标；按数组下标取会全部 undefined，每根骨骼都变根骨骼。
+- **`transform` 约束时间线写 `curve: "stepped"` 会让导入崩溃**：`java.lang.ArrayIndexOutOfBoundsException: 19`，整份骨架进不去。`ik` / `path` 的 stepped 正常。
+- **约束时间线的字段比定义少**：ik 只有 `mix` / `bendPositive`（`softness` 打不进）；transform 只有四个 Mix（`rotation` / `x` / `y` 偏移不是时间线字段）；path 的 `position` 通道只有 `position`（`spacing` 打不进）。
+- **path 约束的动画键名是单数 `path`**，值是 `{ position: [...], mix: [...] }` 的对象；`ik` / `transform` 的时间线却是**直接一个关键帧数组**，没有通道层。
+- **3.8 的贝塞尔控制点不是四点数组**：`curve` 存 cx1，cy1/cx2/cy2 落在同级 `c2`/`c3`/`c4`（默认 0/1/1）。传数组会报 `IllegalStateException: Value cannot be converted to float: array`。
 - stdio 的 stdout 只输出 MCP 消息，日志全走 stderr；配置后若显示「暂无工具」需重启客户端。
 
 ## 协议兼容
@@ -502,4 +558,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）以及**约束参数**（`spine_edit_constraints`）都可在 JSON 副本上修改（P4 / P4b / P10），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
 - CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告、P12 的图集打包串联、P13 的 `.skel` 二进制结构级解析与 P14 的面片结构明细 / 渲染预览均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：渲染画面与结构数据的自动比对——P14 已能把结构数据和渲染帧都拿到手，但「哪里对不上」仍需人（或模型看图）判断，没有做像素级回归。产物二进制已进 P13，`.skel` 的字节级结构（含引用完整性）会真解析到文件末尾并逐项校验。协议层与纯逻辑层已跑通自动化测试。
+- 约束侧：`ik` / `transform` 可按 3.8 语义求解（含 order 排序、时间线 mix），`path` **不求解**（缺 path 附件的贝塞尔几何）；约束时间线可打帧，但只限各类型实测支持的那几个字段。物理（physics）约束 3.8 本身没有，MCP 自然也不支持。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。

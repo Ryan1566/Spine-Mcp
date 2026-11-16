@@ -37,6 +37,8 @@ import { editWeights } from './weight-ops.mjs';
 import { auditProject } from './project-audit.mjs';
 import { inspectAnimation, editAnimation } from './animation-detail.mjs';
 import { modifySlots, modifySkins, inspectConstraints, modifyConstraints } from './structure-ops.mjs';
+import { animateConstraint, inspectConstraintTracks, CONSTRAINT_ANIMATION_FIELDS } from './constraint-anim.mjs';
+import { diagnoseConstraints } from './constraint-diagnostics.mjs';
 import { inspectAtlas, auditAssets } from './asset-audit.mjs';
 import { writeJsonCopy } from './write-safety.mjs';
 import { runExportWorkflow } from './export-workflow.mjs';
@@ -669,13 +671,66 @@ export const TOOLS = [
         type: { type: 'string', enum: ['ik', 'transform', 'path'], description: 'list 可省略（返回三类），写操作必填' },
         name: { type: 'string', description: 'remove / rename / set 的目标约束名' },
         newName: { type: 'string', description: 'rename 的新约束名' },
-        constraint: { type: 'object', description: 'add / set 的字段：ik 支持 order/bones/target/mix/bendPositive；transform 另有 skin/x/y/rotation/scaleX/scaleY/shearX/shearY/rotateMix/translateMix/scaleMix/shearMix；path 另有 positionMode/spacingMode/rotateMode/rotation/position/spacing/rotateMix/translateMix', additionalProperties: true },
+        constraint: { type: 'object', description: 'add / set 的字段：ik 支持 order/bones/target/skin/mix/softness/bendPositive/stretch/uniform；transform 另有 x/y/rotation/scaleX/scaleY/shearX/shearY/rotateMix/translateMix/scaleMix/shearMix/local/relative；path 另有 positionMode/spacingMode/rotateMode/rotation/position/spacing/rotateMix/translateMix/local/relative', additionalProperties: true },
         dropAnimationTracks: { type: 'boolean', description: 'remove 时清掉引用该约束的动画轨道，默认 false（存在引用即拒绝删除）' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
         dryRun: { type: 'boolean', description: '只返回变更摘要与将要写入的内容，不落盘' },
         backup: { type: 'boolean', description: '覆盖旧输出前备份，默认 true' },
       },
       required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_animate_constraint',
+    description: '给 3.8.75 的 ik / transform / path 约束打帧（写 animations.<动画>.<约束类型>.<约束名>）。mode:list 只读列出已有约束轨道；write 落盘 JSON 副本。字段白名单是实测结论：ik 只有 mix / bendPositive（softness 打不进时间线）；transform 只有 rotateMix / translateMix / scaleMix / shearMix（rotation/x/y 偏移不是时间线字段）；path 分 position 与 mix 两个通道（position 通道只有 position，spacing 打不进）。省略的字段按 3.8 默认值处理，不会写进 JSON。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径（只读）' },
+        outputJsonPath: { type: 'string', description: '输出 JSON 绝对路径（write 模式必填）' },
+        mode: { type: 'string', enum: ['write', 'list'], description: '默认 write；list 只返回现有约束轨道，不写文件' },
+        animationName: { type: 'string', description: 'write 必填；动画不存在时按 createAnimation 决定是否新建' },
+        type: { type: 'string', enum: ['ik', 'transform', 'path'], description: 'write 必填：约束类型' },
+        name: { type: 'string', description: 'write 必填：约束名（必须已在工程里存在）' },
+        channel: { type: 'string', enum: ['position', 'mix'], description: '仅 path 用：position 通道写 position；mix 通道写 rotateMix / translateMix。默认 position' },
+        keys: {
+          type: 'array',
+          description: '关键帧数组，按 time 升序即可（会自动排序）。每项：{time, 字段..., curve?}。curve 支持 "stepped" / 数字 / 4 元数组（内部翻译成 3.8 原生 curve+c2/c3/c4）',
+          items: {
+            type: 'object',
+            properties: {
+              time: { type: 'number', description: '秒' },
+              curve: { description: '"stepped" / 数字 cx1 / 4 元数组 [cx1,cy1,cx2,cy2]' },
+            },
+            required: ['time'],
+            additionalProperties: true,
+          },
+        },
+        trackMode: { type: 'string', enum: ['set', 'merge'], description: 'set 覆盖整条轨道（默认）；merge 按 time 合并已有帧' },
+        createAnimation: { type: 'boolean', description: '动画不存在时是否新建，默认 true' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: '只返回摘要，不落盘' },
+        backup: { type: 'boolean', description: '覆盖旧输出前备份，默认 true' },
+      },
+      required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_solve_constraints',
+    description: '诊断 3.8.75 约束求解：沿动画时间线采样，逐条回报 mix/生效次数/位移骨骼数，并对 IK 检查「链末端到 target 的距离」是否收敛（臂展内却不收敛 = 求解有问题）。还检测 order 冲突、单骨 bendPositive 无效、path 未参与求解等。纯计算，不写文件、不调 CLI。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' },
+        animationName: { type: 'string', description: '可选；给了就在整条动画上采样，不给只算 setup 姿态' },
+        time: { type: 'number', description: '可选，单个采样时刻（秒）；与 times 互斥，优先 times' },
+        times: { type: 'array', items: { type: 'number' }, description: '可选，自定义采样时刻列表（秒）' },
+        solve: { type: 'boolean', description: '默认 true；false 时为「不求解」基线，用于对比' },
+        tolerance: { type: 'number', description: 'IK 末端到 target 的容差（世界单位），默认 1' },
+      },
+      required: ['jsonPath'],
       additionalProperties: false,
     },
   },
@@ -1462,6 +1517,53 @@ export async function callTool(name, args = {}) {
         ...result.summary,
         constraintNames: (result.json[args.type] ?? []).map((entry) => entry?.name),
       };
+    }
+
+    case 'spine_animate_constraint': {
+      if (args.mode === 'list') {
+        const skeleton = await readJson(args.sourceJsonPath);
+        return {
+          sourceJsonPath: args.sourceJsonPath,
+          ...inspectConstraintTracks(skeleton, { type: args.type, name: args.name, animationName: args.animationName }),
+        };
+      }
+      const skeleton = await readJson(args.sourceJsonPath);
+      const result = animateConstraint(skeleton, {
+        animationName: args.animationName,
+        type: args.type,
+        name: args.name,
+        channel: args.channel,
+        keys: args.keys,
+        mode: args.trackMode ?? 'set',
+        createAnimation: args.createAnimation !== false,
+      });
+      if (!args.outputJsonPath) throw new Error('写入模式必须提供 outputJsonPath');
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json: result.json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return {
+        ...written,
+        ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }),
+        ...result.summary,
+      };
+    }
+
+    case 'spine_solve_constraints': {
+      const skeleton = await readJson(args.jsonPath);
+      const report = diagnoseConstraints(skeleton, {
+        animationName: args.animationName ?? null,
+        time: args.time,
+        times: args.times,
+        skeletonLabel: path.basename(args.jsonPath),
+        solve: args.solve !== false,
+        tolerance: args.tolerance ?? 1,
+      });
+      return report;
     }
 
     case 'spine_inspect_atlas': {

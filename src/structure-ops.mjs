@@ -265,14 +265,17 @@ export function inspectConstraints(skeleton) {
   const bones = boneNames(skeleton);
   const issues = [];
   const constraints = [];
-  for (const [type, key, animationKey] of [['ik', 'ik', 'ik'], ['transform', 'transform', 'transform'], ['path', 'path', 'paths']]) {
+  for (const [type, key, animationKey] of [['ik', 'ik', 'ik'], ['transform', 'transform', 'transform'], ['path', 'path', 'path']]) {
     for (const [index, constraint] of (skeleton?.[key] ?? []).entries()) {
       const refs = [...(constraint.bones ?? []), constraint.target].filter(Boolean);
       const missingBones = refs.filter((name) => !bones.has(name));
       if (missingBones.length) issues.push({ type, name: constraint.name, missingBones });
       const animations = Object.entries(skeleton.animations ?? {})
         .filter(([, animation]) => animation?.[animationKey]?.[constraint.name])
-        .map(([name, animation]) => ({ name, keyframes: animation[animationKey][constraint.name].length ?? 0 }));
+        .map(([name, animation]) => ({
+          name,
+          keyframes: countConstraintKeys(animation[animationKey][constraint.name]),
+        }));
       constraints.push({ type, index, name: constraint.name, definition: structuredClone(constraint), missingBones, animations });
     }
   }
@@ -291,8 +294,12 @@ const CONSTRAINT_SPECS = {
       order: 'order',
       bones: 'bones',
       target: 'bone',
+      skin: 'string',
       mix: 'number',
+      softness: 'number',
       bendPositive: 'boolean',
+      stretch: 'boolean',
+      uniform: 'boolean',
     },
   },
   transform: {
@@ -314,15 +321,19 @@ const CONSTRAINT_SPECS = {
       translateMix: 'number',
       scaleMix: 'number',
       shearMix: 'number',
+      local: 'boolean',
+      relative: 'boolean',
     },
   },
   path: {
     arrayKey: 'path',
-    animationKey: 'paths',
+    // 3.8 的路径约束时间线挂在 animations.<anim>.path.<name>，值是**对象**（position / mix 两组），不是数组。
+    animationKey: 'path',
     fields: {
       order: 'order',
       bones: 'bones',
       target: 'bone',
+      skin: 'string',
       positionMode: 'positionMode',
       spacingMode: 'spacingMode',
       rotateMode: 'rotateMode',
@@ -331,6 +342,8 @@ const CONSTRAINT_SPECS = {
       spacing: 'number',
       rotateMix: 'number',
       translateMix: 'number',
+      local: 'boolean',
+      relative: 'boolean',
     },
   },
 };
@@ -422,11 +435,28 @@ function pathTargetHint(json, target) {
   return `目标骨骼 ${target} 的插槽上没找到 type=path 的附件，请确认路径附件放在该骨骼的插槽上`;
 }
 
+// 约束时间线的关键帧总数：ik / transform 是数组；path 是 { position: [...], mix: [...] } 嵌套对象。
+function countConstraintKeys(track) {
+  if (Array.isArray(track)) return track.length;
+  if (track && typeof track === 'object') {
+    return Object.values(track).reduce((sum, keys) => sum + (Array.isArray(keys) ? keys.length : 0), 0);
+  }
+  return 0;
+}
+
 function constraintAnimationRefs(json, type, name) {
   const { animationKey } = constraintSpec(type);
   const hits = [];
   for (const [animationName, animation] of Object.entries(json.animations ?? {})) {
-    if (animation?.[animationKey]?.[name]) hits.push({ animation: animationName, keyframes: animation[animationKey][name].length ?? 0 });
+    const track = animation?.[animationKey]?.[name];
+    if (!track) continue;
+    // ik / transform 的时间线是数组；path 是 { position: [...], mix: [...] } 的嵌套对象
+    if (Array.isArray(track)) {
+      hits.push({ animation: animationName, keyframes: track.length });
+    } else {
+      const channels = Object.keys(track).filter((k) => Array.isArray(track[k]));
+      hits.push({ animation: animationName, channels, keyframes: countConstraintKeys(track) });
+    }
   }
   return hits;
 }

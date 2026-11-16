@@ -18,6 +18,10 @@
 //   - 加权 mesh 的 boneIndex 是**全局 bones[] 下标**（见 weight-ops.mjs）。
 import { parseWeightedMesh } from './weight-ops.mjs';
 import { skinEntries } from './mesh-inspect.mjs';
+import { composeWorld, buildBoneIndex, recomputeSubtree } from './bone-math.mjs';
+import {
+  orderedConstraints, mergeConstraintValues, applyConstraint, constraintStats,
+} from './constraints.mjs';
 
 const DEG = Math.PI / 180;
 const round4 = (n) => Math.round(n * 10000) / 10000;
@@ -200,11 +204,6 @@ export function computeWorldBones(skeleton, pose) {
     }
     visiting.add(i);
     const local = pose?.[i] ?? setupPose([data])[0];
-    const rotationY = local.rotation + 90 + local.shearY;
-    const la = Math.cos((local.rotation + local.shearX) * DEG) * local.scaleX;
-    const lb = Math.cos(rotationY * DEG) * local.scaleY;
-    const lc = Math.sin((local.rotation + local.shearX) * DEG) * local.scaleX;
-    const ld = Math.sin(rotationY * DEG) * local.scaleY;
 
     let parent = null;
     if (data.parent != null) {
@@ -223,16 +222,8 @@ export function computeWorldBones(skeleton, pose) {
       problems.push(`骨骼 ${data.name} 的 inherit=${local.inherit}，当前按 normal 计算（可能偏移）`);
     }
 
-    const m = parent
-      ? {
-        a: parent.a * la + parent.b * lc,
-        b: parent.a * lb + parent.b * ld,
-        c: parent.c * la + parent.d * lc,
-        d: parent.c * lb + parent.d * ld,
-        x: parent.x + local.x * parent.a + local.y * parent.b,
-        y: parent.y + local.x * parent.c + local.y * parent.d,
-      }
-      : { a: la, b: lb, c: lc, d: ld, x: local.x, y: local.y };
+    // 矩阵数学统一走 bone-math，约束求解重算子树时用的是同一份，避免两处实现走样
+    const m = composeWorld(parent, local);
 
     const out = {
       name: data.name,
@@ -263,6 +254,111 @@ export function computeWorldBones(skeleton, pose) {
 
   for (let i = 0; i < bones.length; i += 1) resolve(i);
   return { world, problems };
+}
+
+// ---- P16：约束时间线采样 + 求解 ----
+// 三种约束的时间线形态不一致：
+//   ik.<name>        → 数组 [{time, mix, softness?, bendPositive?}]
+//   transform.<name> → 数组 [{time, rotateMix, translateMix, scaleMix, shearMix}]
+//   path.<name>      → **嵌套对象** {position: [...], mix: [{time, rotateMix, translateMix}]}
+const TIMELINE_KEY_NOISE = new Set(['time', 'curve', 'c2', 'c3', 'c4']);
+
+const CONSTRAINT_TIMELINE_DEFAULTS = {
+  ik: { mix: 1, softness: 0 },
+  transform: { rotateMix: 1, translateMix: 1, scaleMix: 1, shearMix: 1 },
+  path: { position: 0, spacing: 0, rotateMix: 1, translateMix: 1 },
+};
+
+// 从一段关键帧数组里采样：数字走曲线插值，布尔取「当前时间点或之前最后一帧」（布尔不能插值）
+export function sampleConstraintKeys(keys, time, defaults = {}) {
+  if (!Array.isArray(keys) || keys.length === 0) return null;
+  const numericFields = new Set();
+  const booleanFields = new Set();
+  for (const key of keys) {
+    for (const [field, value] of Object.entries(key ?? {})) {
+      if (TIMELINE_KEY_NOISE.has(field)) continue;
+      if (typeof value === 'boolean') booleanFields.add(field);
+      else if (typeof value === 'number') numericFields.add(field);
+    }
+  }
+  const out = {};
+  const numeric = [...numericFields];
+  if (numeric.length) {
+    const fallback = (field) => (Number.isFinite(defaults[field]) ? defaults[field] : 0);
+    const values = sampleTimeline(keys, time, (key) => numeric.map((f) => (typeof key[f] === 'number' ? key[f] : fallback(f))));
+    if (values) numeric.forEach((f, i) => { out[f] = values[i]; });
+  }
+  for (const field of booleanFields) {
+    let picked;
+    for (const key of keys) if ((key.time ?? 0) <= time) picked = key[field];
+    if (picked === undefined) picked = keys[0][field];
+    out[field] = picked;
+  }
+  return out;
+}
+
+function sampleConstraintValues(animation, entry, time) {
+  const bag = animation?.[entry.type];
+  const raw = bag && typeof bag === 'object' ? bag[entry.data.name] : null;
+  if (!raw) return null;
+  const defaults = CONSTRAINT_TIMELINE_DEFAULTS[entry.type] ?? {};
+  if (entry.type === 'path') {
+    if (Array.isArray(raw)) return sampleConstraintKeys(raw, time, defaults);
+    const merged = {};
+    for (const sub of Object.values(raw)) {
+      const sampled = sampleConstraintKeys(sub, time, defaults);
+      if (sampled) Object.assign(merged, sampled);
+    }
+    return Object.keys(merged).length ? merged : null;
+  }
+  return Array.isArray(raw) ? sampleConstraintKeys(raw, time, defaults) : null;
+}
+
+// 算完全部骨骼世界变换后，按 order 依次求解约束；每次求解完重算受影响骨骼的整棵子树。
+export function computeWorldWithConstraints(skeleton, pose, options = {}) {
+  const { animation = null, time = 0, solve = true } = options;
+  const base = computeWorldBones(skeleton, pose);
+  const world = base.world;
+  const problems = [...base.problems];
+  const warnings = [];
+  const entries = orderedConstraints(skeleton);
+  const report = { total: entries.length, solved: 0, skipped: 0, counts: constraintStats(skeleton), entries: [] };
+
+  if (entries.length === 0) return { world, problems, warnings, constraints: report };
+  if (!solve) {
+    warnings.push(`工程含 ${entries.length} 条约束，本次按 solve:false 跳过求解（线框会与渲染有偏差）`);
+    return { world, problems, warnings, constraints: report };
+  }
+
+  const index = buildBoneIndex(skeleton);
+  for (const entry of entries) {
+    const timelineValues = sampleConstraintValues(animation, entry, time);
+    const values = mergeConstraintValues(entry.type, entry.data, timelineValues);
+    const boneIdx = (entry.data.bones ?? []).map((n) => index.indexByName.get(n)).filter((i) => i != null);
+    const before = boneIdx.map((i) => ({ name: index.bones[i]?.name, x: world[i]?.x, y: world[i]?.y, rotation: world[i] ? round4(world[i].local?.rotation) : null }));
+    const result = applyConstraint(skeleton, pose, world, index, entry, values);
+    warnings.push(...result.warnings);
+    for (const i of result.changed) recomputeSubtree(skeleton, pose, world, i, index);
+    const after = boneIdx.map((i) => ({ name: index.bones[i]?.name, x: world[i]?.x, y: world[i]?.y, rotation: world[i] ? round4(world[i].local?.rotation) : null }));
+    const moved = after.filter((a, k) => before[k].x !== a.x || before[k].y !== a.y || before[k].rotation !== a.rotation).length;
+    if (result.changed.length) report.solved += 1; else report.skipped += 1;
+    report.entries.push({
+      type: entry.type,
+      name: entry.data.name,
+      order: entry.order,
+      values: timelineValues ?? 'static',
+      bones: (entry.data.bones ?? []).join(','),
+      target: entry.data.target ?? null,
+      changedBones: result.changed.map((i) => index.bones[i]?.name),
+      movedBones: moved,
+      before,
+      after,
+      warnings: result.warnings,
+    });
+  }
+  // 求解后重新收集一遍骨骼层面问题（缩放为 0 之类会在这里暴露）
+  if (report.solved === 0) warnings.push('工程里的约束全部没有产生位移，检查 mix / order / target 是否合理');
+  return { world, problems, warnings, constraints: report };
 }
 
 // 骨骼末端世界坐标（沿本地 +x 走 length）
@@ -338,6 +434,7 @@ export function evaluateScene(skeleton, options = {}) {
     skin: skinName = null,
     atlas = null,
     includeRegions = true,
+    solveConstraints = true,
   } = options;
   if (!skeleton || !Array.isArray(skeleton.bones)) throw new Error('skeleton JSON 缺少 bones 数组');
   if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) throw new Error('time 必须是非负有限秒数');
@@ -355,8 +452,10 @@ export function evaluateScene(skeleton, options = {}) {
     warnings.push(`time=${time}s 超出动画时长 ${duration}s，已按最后一帧静止延续`);
   }
 
-  const { world, problems } = computeWorldBones(skeleton, pose);
+  const solved = computeWorldWithConstraints(skeleton, pose, { animation, time, solve: solveConstraints });
+  const { world, problems } = solved;
   warnings.push(...problems);
+  warnings.push(...solved.warnings);
 
   const boneIndexByName = new Map(skeleton.bones.map((b, i) => [b.name, i]));
   const slots = skeleton.slots ?? [];
@@ -528,6 +627,7 @@ export function evaluateScene(skeleton, options = {}) {
     meshes,
     regions,
     bounds,
+    constraints: solved.constraints,
     stats: {
       bones: world.length,
       animatedBones: Object.keys(animation?.bones ?? {}).length,
