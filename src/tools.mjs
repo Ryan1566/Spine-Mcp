@@ -23,6 +23,8 @@ import { collectRenderOutputs } from './render-outputs.mjs';
 import { backupIfExists, listBackups } from './backup.mjs';
 import { verifyExport } from './verify-export.mjs';
 import { parseSkelFile } from './skel-parse.mjs';
+import { inspectMesh, DETAILS } from './mesh-inspect.mjs';
+import { renderPreview } from './render-preview.mjs';
 import { assertDirectory, packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
@@ -106,6 +108,42 @@ export const TOOLS = [
         detail: { type: 'boolean', description: '为 true 时额外回传完整骨骼 / 插槽 / 约束明细，默认只给计数与动画时长' },
       },
       required: ['skelPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_inspect_mesh',
+    description: '只读解析 skeleton JSON 的面片结构：每个 mesh 的顶点 / 三角面 / UV / 每顶点骨骼权重，可按骨骼反查影响面片。纯本地解析，不调 CLI、不消耗渲染。默认首选；需要看实际画面时再配 spine_render_preview。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径（必须存在）' },
+        mesh: { type: 'string', description: '只看某个 mesh：附件名，或「插槽名/附件名」' },
+        bone: { type: 'string', description: '按骨骼反查：该骨骼影响了哪些面片、多少顶点、权重和' },
+        detail: { type: 'string', enum: DETAILS, description: 'summary 只给统计（默认）；faces 附三角面索引；weights 附逐顶点权重' },
+        limit: { type: 'integer', minimum: 1, description: '明细条数上限，默认 50' },
+      },
+      required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_render_preview',
+    description: '一行式渲染预览：给工程路径与输出目录即可出图，自动生成并清理临时导出设置（不需要预先准备 export-settings.json）。默认 png + 全部动画。用于结构检查失败时兜底，或全面评审时与 spine_inspect_mesh 的结构数据对照。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: '.spine 工程绝对路径（必须存在）' },
+        outputDir: { type: 'string', description: '输出目录绝对路径，不存在会自动创建' },
+        format: { type: 'string', enum: ['png', 'mov', 'avi', 'gif'], description: '默认 png' },
+        animationType: { type: 'string', enum: ['all', 'single', 'current'], description: '默认 all；png + all 时 -o 会被当目录' },
+        lastFrame: { type: 'boolean', description: 'true 时输出动画的每一帧' },
+        msaa: { type: 'number', description: '多重采样，实测 4 可用' },
+        backgroundColor: { type: 'string', description: '#RRGGBB 或 #RRGGBBAA，会转成 {r,g,b,a}' },
+        timeoutMs: { type: 'number', description: 'CLI 超时毫秒数，默认 600000' },
+        dryRun: { type: 'boolean', description: 'true 时只返回计划，不生成设置也不启动 CLI' },
+      },
+      required: ['projectPath', 'outputDir'],
       additionalProperties: false,
     },
   },
@@ -814,6 +852,30 @@ export async function callTool(name, args = {}) {
         errorCount: parsed.errorCount,
         warningCount: parsed.warningCount,
       };
+    }
+
+    case 'spine_inspect_mesh': {
+      const skeleton = await readJson(args.jsonPath);
+      return inspectMesh(skeleton, {
+        mesh: args.mesh,
+        bone: args.bone,
+        detail: args.detail ?? 'summary',
+        limit: args.limit ?? 50,
+      });
+    }
+
+    case 'spine_render_preview': {
+      return renderPreview({
+        projectPath: args.projectPath,
+        outputDir: args.outputDir,
+        format: args.format ?? 'png',
+        animationType: args.animationType ?? 'all',
+        lastFrame: args.lastFrame,
+        msaa: args.msaa,
+        backgroundColor: args.backgroundColor,
+        timeoutMs: args.timeoutMs ?? 600000,
+        dryRun: args.dryRun === true,
+      });
     }
 
     case 'spine_frames_to_seconds': {

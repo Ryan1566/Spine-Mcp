@@ -57,13 +57,14 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 34 个工具
+## 36 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
 | `spine_doctor` | 检查 Node / SPINE_EXE / 协议版本；`probe=true` 时跑 `--help` | 可选 |
 | `spine_inspect_json` | 只读解析导出的 skeleton JSON，列出骨骼/插槽/皮肤/动画/事件 | 否 |
 | `spine_inspect_skel` | 只读解析二进制 `.skel`：逐字段读到文件末尾，回传结构计数、动画时长与引用完整性检查 | 否 |
+| `spine_inspect_mesh` | 只读解析面片结构：每个 mesh 的顶点 / 三角面 / UV / 逐顶点骨骼权重，可按骨骼反查影响面片 | 否 |
 | `spine_frames_to_seconds` | 帧规格 → Spine 秒表，标出命中帧 | 否 |
 | `spine_build_combat_animation` | 在 JSON **副本**上写骨骼关键帧、插槽换图、事件帧 | 否 |
 | `spine_validate_timeline` | 静态校验时间轴递增、骨骼存在、事件定义齐全 | 否 |
@@ -75,6 +76,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_version` | 启动器版本信息（`--version`），只读 | 是 |
 | `spine_make_export_settings` | 生成导出设置 JSON：数据导出 `json` / `binary`，渲染导出 `png` / `mov` / `avi` / `gif`，均已实测 | 否 |
 | `spine_verify_export` | 只读比对源工程与导出目录产物（`.json` 走 CLI、`.skel` 走本地解析）的骨骼 / 插槽 / 动画 / IK 列表 | 是 |
+| `spine_render_preview` | 一行式渲染预览：给工程与输出目录就出图，自动生成并清理临时导出设置 | 是 |
 | `spine_pack_atlas` | 图集打包（`-i/-o/-p`，可选 `-j`/`-n`），支持图集名或 pack.json | 是 |
 | `spine_unpack_atlas` | 图集解包（`-i/-o/-c`），把 atlas 页还原成散图 | 是 |
 | `spine_restore_backup` | 把写前备份恢复回 `.spine` 工程，需 `overwrite:true`，恢复前再备份当前目标 | 否 |
@@ -306,6 +308,47 @@ header → 字符串表 → bones → slots → ik → transform → path
 - **官方实测**：raptor / spineboy / mix-and-match / stretchyman / tank / alien / vine / owl 共 8 个工程导出二进制后全部 `trailingBytes=0`、`errorCount=0`；骨骼 / 插槽 / IK / transform / path / 皮肤 / 附件 / 事件 / 动画计数与对应 JSON 全部一致（`mix-and-match` 34 皮肤 373 附件、`tank` 200 插槽、`spineboy` 80 附件均对上）。`raptor` 的 JSON + Binary 同目录混合校验 `ok=true`，把 `.skel` 截掉 40 字节后 `ok=false` 并指出越界偏移。
 - `npm test` **108/108**（新增 `tests/p13-skel.test.mjs` 10 例，内含一个精简 `.skel` 编码器，用手工构造的「已知答案」字节流验证解析，不依赖 CLI）。
 
+## P14：面片结构明细与渲染预览（双通道评审）
+
+面片这一层此前只有「合法性校验」和「权重数值」两个视角，看不到某个 mesh 实际怎么连、被哪些骨骼拉。P14 补上结构通道与视觉通道：
+
+| 通道 | 工具 | 特点 |
+|---|---|---|
+| 结构（首选） | `spine_inspect_mesh` | 纯 JSON 解析，秒级、零渲染、不调 CLI |
+| 视觉（兜底 / 对照） | `spine_render_preview` | 真调 CLI 出图，几秒到几分钟 |
+
+**默认策略**：先用 `spine_inspect_mesh`；它报错或需要确认画面时再用 `spine_render_preview`。**全面评审时两者同时调用**——把结构数据（面片数、顶点数、权重骨骼）与实际渲染帧对照，对不上就说明工程里有结构问题或导出设置不对，再针对性调整。
+
+### spine_inspect_mesh
+
+```json
+{ "jsonPath": "D:/out/citizen_001.json", "detail": "weights", "bone": "bone_head", "limit": 20 }
+```
+
+- `detail`：`summary`（默认，只要统计）/ `faces`（附三角面索引）/ `weights`（附逐顶点权重）。
+- `mesh`：只看一个面片，支持 `附件名` 或 `插槽名/附件名`。
+- `bone`：按骨骼反查——这根骨骼影响了哪些面片、多少顶点、权重和多少。排查变形问题时比看总数有用。
+- 自查项：uvs 长度、顶点数 ≥ 3、`triangles` 是否 3 的倍数、三角面下标越界、权重和是否等于 1、权重引用的骨骼下标是否存在。问题进 `issues`，不抛异常。
+- **3.8 的 `skins` 是数组** `[{name, attachments}]`，不是字典。按字典遍历会得出「0 个 mesh」这种完全错误的结论（踩过）。
+
+### spine_render_preview
+
+```json
+{ "projectPath": "D:/proj/citizen_001.spine", "outputDir": "D:/out/preview", "format": "png", "backgroundColor": "#202020" }
+```
+
+- 不需要预先准备 `export-settings.json`：内部生成 → 调 CLI → 回收产物 → 删临时设置，`settings.removed=true` 可确认。
+- 参数：`format`（png/mov/avi/gif）、`animationType`（all/single/current）、`lastFrame`、`msaa`、`backgroundColor`、`timeoutMs`、`dryRun`。
+- `-o` 语义沿用 P9：png + `animationType=all` 时当**目录**，其余是**文件基名**（内部用工程名当基名）。
+- 默认只出每个动画的首帧；要每一帧加 `lastFrame: true`。
+- **浅色美术一定要换背景**：实测白底导出 citizen_001 几乎全白、看着像「没渲染」，换 `#202020` 后能看到完整角色并确认贴图正常。默认白底在这个场景会误导判断。
+- 失败时回传 `error`（取 `Caused by` 那行）与已扫描目录，不静默成功。
+
+**官方实测**：`citizen_001` 16 个 mesh / 76 顶点 / 46 三角面，全部加权；`bone_head` 影响 `face`、`neck`、`hair` 三个面片共 12 个顶点、权重和 11.7615。`spine_render_preview` 出 6 张 png（141×115 等），4.9 秒，文件名形如 `citizen_001-Idle_Normal_Test_001_0.png`，与 `body.png` 的米黄配色一致，结构数据与渲染结果吻合。
+
+`npm test` **119/119**（新增 `tests/p14-mesh.test.mjs` 11 例，覆盖统计、面片 / 顶点明细、骨骼反查、拓扑异常、双 skin 格式兼容、`-o` 语义与 dryRun 不落盘）。
+
+
 ## 与 GUI 联动（方案 C）
 
 CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不监听磁盘变化，所以 CLI 写完 `.spine` 后窗口里还是旧内容。官方 CLI 没有 reload / watch 参数，`prefs.json` 没有自动重载开关，`hotkeys.txt` 里只有 `Ctrl+O` 打开工程、`Ctrl+S` 保存。
@@ -388,5 +431,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）以及**约束参数**（`spine_edit_constraints`）都可在 JSON 副本上修改（P4 / P4b / P10），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告、P12 的图集打包串联与 P13 的 `.skel` 二进制结构级解析均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：渲染导出的画面内容比对（只看容器与文件头）。产物二进制已进 P13，`.skel` 的字节级结构（含引用完整性）现在会真解析到文件末尾并逐项校验。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告、P12 的图集打包串联、P13 的 `.skel` 二进制结构级解析与 P14 的面片结构明细 / 渲染预览均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：渲染画面与结构数据的自动比对——P14 已能把结构数据和渲染帧都拿到手，但「哪里对不上」仍需人（或模型看图）判断，没有做像素级回归。产物二进制已进 P13，`.skel` 的字节级结构（含引用完整性）会真解析到文件末尾并逐项校验。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。
