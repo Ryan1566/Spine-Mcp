@@ -651,14 +651,16 @@ export const TOOLS = [
   },
   {
     name: 'spine_export_workflow',
-    description: '批量导出工作流：自动生成已验证的 json / binary 导出设置（临时目录，默认用后删除）、一次 CLI 调用多组 -i/-e、可选产物校验。支持 dryRun；不开启 cleanUp，不改源工程。',
+    description: '批量导出工作流：多工程 × 多格式矩阵，自动生成已验证的 json / binary 导出设置（临时目录，默认用后删除），逐 job 调用 CLI 并回传统一产物报告（文件、大小、按格式汇总）与可选校验。支持 dryRun；不开启 cleanUp，不改源工程。',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: '主 .spine 工程绝对路径' },
+        projectPath: { type: 'string', description: '主 .spine 工程绝对路径（与 projects 至少给一个）' },
+        projects: { type: 'array', description: '可选，额外工程列表，与 projectPath 组成多工程矩阵；多工程时每个工程在 outputDir 下单独子目录', items: { type: 'string' } },
         outputDir: { type: 'string', description: '导出输出目录绝对路径' },
-        format: { type: 'string', enum: ['json', 'binary'], description: '主工程导出格式，默认 json；图片 / 视频未验证不开放' },
-        exportSettingsPath: { type: 'string', description: '可选，主工程已有导出设置 JSON；不提供则自动生成' },
+        format: { type: 'string', enum: ['json', 'binary'], description: '主工程导出格式，默认 json；图片 / 视频请用 spine_export' },
+        formats: { type: 'array', description: '可选，多格式矩阵（每个工程 × 每个格式各一个 job），给出后忽略 format', items: { type: 'string', enum: ['json', 'binary'] } },
+        exportSettingsPath: { type: 'string', description: '可选，已有导出设置 JSON；仅单 job 可用，多 job 请放 extraInputs' },
         extraInputs: {
           type: 'array',
           description: '可选，追加批量导出输入；同一工程可重复出现以导出多种格式',
@@ -678,7 +680,7 @@ export const TOOLS = [
         verify: { type: 'boolean', description: '导出成功后是否用官方 -i Info 校验产物，默认 false' },
         dryRun: { type: 'boolean', description: 'true 时只返回计划，不建目录、不写设置、不调用 CLI' },
       },
-      required: ['projectPath', 'outputDir'],
+      required: ['outputDir'],
       additionalProperties: false,
     },
   },
@@ -1176,8 +1178,10 @@ export async function callTool(name, args = {}) {
     case 'spine_export_workflow': {
       return runExportWorkflow({
         projectPath: args.projectPath,
+        projects: args.projects ?? [],
         outputDir: args.outputDir,
         format: args.format,
+        formats: args.formats ?? [],
         exportSettingsPath: args.exportSettingsPath,
         extraInputs: args.extraInputs ?? [],
         prettyPrint: args.prettyPrint,
