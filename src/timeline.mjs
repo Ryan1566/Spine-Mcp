@@ -94,9 +94,35 @@ function buildTimeline(keys, frames, fps, kind, bone) {
       entry.x = asNumber(key.x, 0, `${bone}.shear.x`);
       entry.y = asNumber(key.y, 0, `${bone}.shear.y`);
     }
-    if (key.curve !== undefined) entry.curve = key.curve;
+    if (key.curve !== undefined) applyCurve(entry, key.curve, `${bone}.${kind}.curve`);
     return entry;
   });
+}
+
+// Spine 3.8 的贝塞尔控制点**不是数组**：curve 存 cx1，cy1/cx2/cy2 落在同级的 c2/c3/c4。
+// 传数组（4.x 写法）会被 3.8 的 readCurve 当成 curve.asFloat() 直接炸：
+//   IllegalStateException: Value cannot be converted to float: array
+// 所以这里统一转成 3.8 原生编码，数组只作为入参便利语法。
+export function applyCurve(entry, curve, label = 'curve') {
+  if (curve === 'stepped' || curve === 'linear') {
+    if (curve === 'stepped') entry.curve = 'stepped';
+    return entry;
+  }
+  if (typeof curve === 'number' && Number.isFinite(curve)) {
+    entry.curve = curve;
+    return entry;
+  }
+  if (Array.isArray(curve)) {
+    if (curve.length !== 4 || !curve.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      throw new Error(`${label} 数组必须是 4 个有限数字 [cx1, cy1, cx2, cy2]，收到 ${JSON.stringify(curve)}`);
+    }
+    entry.curve = curve[0];
+    entry.c2 = curve[1];
+    entry.c3 = curve[2];
+    entry.c4 = curve[3];
+    return entry;
+  }
+  throw new Error(`${label} 只接受 "stepped" / 数字 cx1 / 4 元数组，收到 ${JSON.stringify(curve)}`);
 }
 
 // 在源 skeleton JSON 的「副本」上写动画，绝不修改源对象/源文件。

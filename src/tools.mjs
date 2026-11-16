@@ -62,7 +62,7 @@ const keyframeSchema = (extra) => ({
   properties: {
     frame: frameRef,
     ...extra,
-    curve: { description: '可选，Spine 曲线：省略为线性，"stepped" 或贝塞尔数值数组' },
+    curve: { description: '可选，缓动：省略为线性，"stepped" 阶梯，或 4 元数组 [cx1,cy1,cx2,cy2]（内部会转成 3.8 的 curve+c2/c3/c4 原生编码）' },
   },
   required: ['frame'],
   additionalProperties: false,

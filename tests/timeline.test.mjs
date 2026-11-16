@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  applyCurve,
   buildCombatAnimation,
   durationSeconds,
   frameTable,
@@ -110,4 +111,44 @@ test('校验器能发现缺失的事件定义与倒序时间', () => {
   assert.equal(report.valid, false);
   assert.ok(report.errors.some((e) => e.includes('严格递增')));
   assert.ok(report.errors.some((e) => e.includes('缺少定义')));
+});
+
+// 3.8 的贝塞尔不是数组：curve=cx1 + 同级 c2/c3/c4。传数组必须被翻译，否则 Spine 直接报
+// IllegalStateException: Value cannot be converted to float: array
+test('贝塞尔 4 元数组会被翻译成 3.8 原生 curve+c2/c3/c4 编码', () => {
+  const { json } = buildCombatAnimation(loadFixture(), {
+    animationName: 'ease',
+    fps: 10,
+    frames: 6,
+    boneControls: [{
+      bone: 'weapon',
+      rotate: [
+        { frame: 1, angle: 0, curve: [0.25, 0.1, 0.75, 0.9] },
+        { frame: 4, angle: 90, curve: 'stepped' },
+        { frame: 6, angle: 0 },
+      ],
+    }],
+  });
+  const keys = json.animations.ease.bones.weapon.rotate;
+  assert.deepEqual(keys[0], { time: 0, angle: 0, curve: 0.25, c2: 0.1, c3: 0.75, c4: 0.9 });
+  assert.deepEqual(keys[1], { time: 0.3, angle: 90, curve: 'stepped' });
+  assert.equal('c2' in keys[1], false, 'stepped 不该带控制点');
+  assert.deepEqual(keys[2], { time: 0.5, angle: 0 });
+  // 产物里不允许出现数组形态的 curve（3.8 读不了）
+  assert.equal(keys.some((k) => Array.isArray(k.curve)), false);
+});
+
+test('curve 传入非法值会报错，而不是写出 Spine 读不了的关键帧', () => {
+  const base = { animationName: 'bad_curve', fps: 10, frames: 4 };
+  const withCurve = (curve) => buildCombatAnimation(loadFixture(), {
+    ...base,
+    boneControls: [{ bone: 'weapon', rotate: [{ frame: 1, angle: 0, curve }, { frame: 3, angle: 1 }] }],
+  });
+  assert.throws(() => withCurve([0.25, 0.1, 0.75]), /4 个有限数字/);
+  assert.throws(() => withCurve([0.25, 0.1, 0.75, 'x']), /4 个有限数字/);
+  assert.throws(() => withCurve('ease-in'), /只接受/);
+  assert.throws(() => withCurve(null), /只接受/);
+  // 数字 cx1 与 linear 仍然合法
+  assert.equal(withCurve(0.4).json.animations.bad_curve.bones.weapon.rotate[0].curve, 0.4);
+  assert.equal('curve' in applyCurve({}, 'linear'), false);
 });
