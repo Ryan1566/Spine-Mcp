@@ -10,7 +10,7 @@
 | 协议 | **dual-era**：legacy `initialize` + modern `server/discover` / `_meta` 版本 | 仅旧握手 |
 | 帧规格 | 内置「N 帧 @ fps → Spine 秒 + 事件帧」换算与生成 | 无 |
 | 写文件 | 只写副本，源文件永不改动；覆盖必须显式 `overwrite` | 支持原地导回 |
-| 工具量 | 22 个 | 55 / 70 个 |
+| 工具量 | 32 个 | 55 / 70 个 |
 
 ## 硬前提（做不到就别装）
 
@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 22 个工具
+## 32 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -66,13 +66,13 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_frames_to_seconds` | 帧规格 → Spine 秒表，标出命中帧 | 否 |
 | `spine_build_combat_animation` | 在 JSON **副本**上写骨骼关键帧、插槽换图、事件帧 | 否 |
 | `spine_validate_timeline` | 静态校验时间轴递增、骨骼存在、事件定义齐全 | 否 |
-| `spine_export` | 官方 CLI 导出（`-i / -o / -e`，可选 `-m`） | 是 |
+| `spine_export` | 官方 CLI 导出（`-i / -o / -e`，可选 `-m`）；数据导出 `-o` 是目录，渲染导出 `-o` 是文件基名并回传产物清单 | 是 |
 | `spine_import_json` | 官方 CLI 导入 JSON / binary / 另一个工程的 skeleton（`-r`，可选 `-s`） | 是 |
 | `spine_clean` | 官方 CLI 清理（`-m`） | 是 |
 | `spine_reload_gui` | 方案 C：请求 Spine GUI 重新打开工程（官方 Editor 模式），支持 `dryRun` | 可选 |
 | `spine_project_info` | 只读工程信息（`-i` Info），返回原始输出 + 结构化摘要 | 是 |
 | `spine_version` | 启动器版本信息（`--version`），只读 | 是 |
-| `spine_make_export_settings` | 生成导出设置 JSON（`json` / `binary` 均已验证），供 `spine_export` 的 `-e` 使用 | 否 |
+| `spine_make_export_settings` | 生成导出设置 JSON：数据导出 `json` / `binary`，渲染导出 `png` / `mov` / `avi` / `gif`，均已实测 | 否 |
 | `spine_verify_export` | 只读比对源工程与导出目录产物的骨骼 / 插槽 / 动画列表 | 是 |
 | `spine_pack_atlas` | 图集打包（`-i/-o/-p`，可选 `-j`/`-n`），支持图集名或 pack.json | 是 |
 | `spine_unpack_atlas` | 图集解包（`-i/-o/-c`），把 atlas 页还原成散图 | 是 |
@@ -83,23 +83,33 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_build_batch_animations` | 多 skeleton 批量生成同名动画副本，单个失败不影响其它 | 否 |
 | `spine_modify_bones` | 在 JSON 副本上改骨骼结构 / setup pose：`list`/`add`/`remove`/`rename`/`reparent`/`set` | 否 |
 | `spine_edit_weights` | 网格权重数值层：`inspect` 校验 / `normalize` 归一化 / `scale` 按骨骼缩放 | 否 |
+| `spine_audit_project` | 只读体检骨骼、插槽、附件、mesh、权重与全部动画引用 | 否 |
+| `spine_inspect_animation` | 查看单条动画的全部时间轴类型、关键帧、曲线与时长 | 否 |
+| `spine_edit_animation` | 动画副本：复制 / 改名 / 删除 / 时间平移 / 时长缩放 / 区间裁剪 | 否 |
+| `spine_edit_slots` | 插槽副本：新增 / 删除（引用保护）/ 改名 / setup 字段 / 排序 | 否 |
+| `spine_edit_skins` | 皮肤副本：新增 / 删除 / 改名 / 按插槽分配附件 | 否 |
+| `spine_inspect_constraints` | 只读检查 IK / transform / path 约束与动画使用 | 否 |
+| `spine_inspect_atlas` | 只读解析 .atlas：页面、region、重叠、越界、缺图 | 否 |
+| `spine_audit_assets` | 审计 skeleton 附件与图集 / 散图的对应关系 | 否 |
+| `spine_export_workflow` | 批量导出工作流：自动生成 json / binary 设置、多组 -i/-e、可选校验、dryRun | 是 |
+| `spine_list_backups` | 只读列出写前备份清单（临时目录 spine-mcp-backups） | 否 |
 
 ## 写操作与人工重载（P0）
 
 - 按项目约定，**不做自动重载**。所有会写 `.spine` 的工具（`spine_clean`、`spine_import_json`，以及 `spine_export` 的 `clean:true`）在成功后返回 `requiresManualReload: true` 与 `reloadHint`，提示在编辑器里手动 `Ctrl+O`；失败时不附加，避免误导。
 - `spine_build_combat_animation` 写的是 JSON 副本，返回 `nextStep`，提示手动 `File → Import Data` 导入，不自动重载工程。
-- `spine_make_export_settings` 只生成设置文件，不改 `.spine`；已验证并开放 `export-json` 与 `export-binary`，图片 / 视频格式未验证故不开放，不猜格式。`settings.output` 会被 `spine_export` 的 `outputDir` 覆盖。
+- `spine_make_export_settings` 只生成设置文件，不改 `.spine`；`json` / `binary` / `png` / `mov` / `avi` / `gif` 六种设置均已实测可用（详见 P9）。`settings.output` 只在数据导出里有意义，且会被 `spine_export` 的 `outputDir` 覆盖。
 - `spine_project_info` 封装官方 `-i` Info 模式，只读；`parsed` 含 `spineVersion` / `dopesheetFps` / `skeletons`（骨骼、插槽、动画列表），解析不出来时为 `null`，原始 `stdout` 始终保留。
 
 ## P1：写前备份、多格式导出与产物校验
 
 - **实测结论**：`spine_clean`（`-i -m`）会**原地改写** `.spine`（副本 10750 → 7994 字节、哈希变化），`spine_import_json`（`-r`）会生成新的 `.spine`，两者 exitCode 均为 0；官方 `-i` Info 也能直接读导出的 skeleton 数据文件（`Project info: null`，但骨骼 / 插槽 / 动画列表完整）。
 - **写前备份**：`spine_clean` 默认 `backup: true`；`spine_import_json` 在 `overwrite: true`、`spine_export` 在 `clean: true` 时默认备份。备份落到系统临时目录 `spine-mcp-backups/`，不污染工程目录与 git 工作区，返回 `backupPath` / `backupHint`；显式 `backup: false` 可关闭。
-- **多格式导出**：`spine_make_export_settings` 的 `format` 支持 `json` / `binary`，两种设置都已在副本上真实导出验证；图片 / 视频格式未验证，不开放。
+- **多格式导出**：`spine_make_export_settings` 的 `format` 支持 `json` / `binary`（数据）与 `png` / `mov` / `avi` / `gif`（渲染）。binary 产物扩展名实测为 `.skel`；渲染产物的扩展名由设置 `class` 决定，设置里的 `extension` 会被忽略（P9 实测）。
 - **`spine_verify_export`**：对源工程与导出目录里每个 `.json` 产物分别跑官方 `-i` Info，按 skeleton 名比对 `bones` / `slots` / `animations` 列表，返回 `ok` / `matched` / `missing` / `mismatches`。只读，但会多次启动 CLI，较慢。
 - **批量导出**：`spine_export` 的 `extraInputs` 可追加多组 `-i/-e`；实测一次调用里混合 JSON 与 Binary 导出成功（exit 0）。
 - 写操作成功后仍统一返回 `requiresManualReload` + `reloadHint`（手动 Ctrl+O），不自动重载。
-- 尚未做：图片 / 视频导出设置、产物二进制内容级比对（当前只比结构）。
+- 尚未做：产物二进制内容级比对（当前只比结构）。图片 / 视频已在 P9 补齐。
 
 ## P2：图集能力与备份回滚
 
@@ -115,7 +125,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 - `spine_manage_events`：`list` 只读（列出定义及被哪些动画引用）；`add` / `remove` / `rename` 写副本，rename 会同步改写所有动画里的事件名，remove 会警告仍在引用该事件的动画。
 - `spine_build_batch_animations`：对多个导出的 skeleton JSON 各生成一条同名动画副本，支持 `boneControlsBySkeleton` 分别指定骨骼、`skipMissingBones` 自动过滤各 skeleton 不存在的骨骼；单个失败只记入 `failures`，不影响其它。
 - 这四个工具写的都是 JSON 副本，统一返回 `nextStep`，提示手动 `File → Import Data`；**不自动重载工程**。
-- **仍有意排除**：图片 / 视频导出设置（格式未验证，不猜）、产物二进制内容级比对、任何 GUI 自动化。
+- **仍有意排除**：产物二进制内容级比对、任何 GUI 自动化。
 
 ## P4：骨骼结构与 setup pose 修改（纯 JSON 层）
 
@@ -129,6 +139,62 @@ node scripts/check-update.mjs      # 等价 npm run check
 - `spine_edit_weights` 三种模式：`inspect` 只读（加权 mesh 数、顶点数、权重和偏离 1 的顶点、无效骨骼下标、每根骨骼的权重汇总）；`normalize` 把每个顶点权重归一到和 = 1；`scale` 按骨骼名 / 下标把该骨骼的权重乘以 `factor`，再逐顶点归一化。
 - 只改 `weight` 数值，**不动顶点坐标、骨骼归属、`att.bones` 映射、骨骼数量**；写 JSON 副本并返回 `nextStep`（手动 Import Data）。
 - **仍做不到**：在编辑器里刷权重、创建 / 编辑 mesh 封套、实时拖骨骼与预览形变（GUI 交互，按约定不做自动化）。数值层能改权重，但改完必须 `spine_import_json` 导回并在编辑器里人工复核形变。
+
+## P5：工程体检与动画时间轴工作流
+
+- `spine_audit_project`：只读检查骨骼父子关系与循环、插槽/附件引用、mesh UV/三角形/权重、全部动画的骨骼/插槽/约束/deform/drawOrder 引用与事件定义；P8 起补齐 slots / IK / transform / path / deform / events / drawOrder 的时间合法性与严格递增检查。返回带 `severity` / `code` / 定位信息的 `issues`，不访问源图片、不写文件。官方 `raptor-pro.json` 实测 74 骨骼、36 插槽、5 动画，0 错误、0 警告。
+- `spine_inspect_animation`：覆盖 bones / slots / IK / transform / path / deform / events / drawOrder，返回每条时间轴的关键帧、曲线类型、起止秒数和动画总时长；`includeKeyframes:false` 只取摘要，`maxKeyframes` 限制返回体量。兼容 Spine 导出时省略默认 `time=0` 的写法。
+- `spine_edit_animation`：`duplicate` / `rename` / `remove` / `shift` / `scale` / `crop`；时间变换覆盖所有已识别时间轴并阻止负 time、重复或倒序关键帧。`crop` 只保留区间内现有关键帧，**不自动补边界插值帧**。
+- `spine_merge_animations` 新增 `boneMap`（donor → base 骨骼映射）、`timeOffset`（所有关键帧秒数平移）、`skipMissingBones`（丢弃仍缺失的骨骼轨道并记录）；默认遇到缺失骨骼仍直接报错。
+- 所有动画修改仍只写 JSON 副本并返回 `nextStep`（人工 Import Data）；`npm test` 61/61，通过官方 raptor 数据只读与副本复制验证，官方源文件哈希不变。
+
+## P6：插槽、皮肤、约束与资源审计
+
+- `spine_edit_slots`：`list` 只读；`add` 校验骨骼存在；`set` 只允许 `bone/attachment/color/dark/blend` 白名单字段；`rename` 同步改写皮肤 key、`animations.slots`、`deform` 与 `drawOrder.offsets`；`remove` 默认拒绝任何皮肤附件或动画引用，`dropAttachments` / `dropAnimationTracks` 需显式开启；`reorder` 要求给出全部插槽的新顺序，不得遗漏或重复。
+- `spine_edit_skins`：`list` 只读；`add` 支持数组 / 对象两种 skins 形态并保持原形态；`assign` 按 `{ skin, slot, name, attachment }` 设置附件，`attachment:null` 表示删除；`rename` 同步 `animations.deform` 顶层 key；`remove` 默认拒绝仍被 deform 引用的皮肤，`dropDeformTracks` 显式开启后清理。
+- `spine_inspect_constraints`：只读列出 IK / transform / path 约束、骨骼引用、缺失骨骼与被哪些动画时间轴使用；本工具不修改约束参数。
+- `spine_inspect_atlas`：解析 3.8 `.atlas` 文本，检查页面图片存在、region 重名 / 越界 / 重叠；`rotate:true` 的 region 按宽高互换后的页面占位做几何校验。
+- `spine_audit_assets`：把 setup 与动画引用的附件和图集 / 散图对上：`mesh.path` 优先于附件名匹配 region；报告图集缺失 region、未被引用的 region 与散图缺文件；不提供 atlas 时跳过图集比对，不提供 imageDir 时跳过散图检查。
+- 官方 `raptor` 实测：`raptor-pma.atlas` 1 页 38 region **0 问题**；39 个附件（含 `mesh.path`）**0 缺失、0 未用 region**；9 个 IK 约束 0 缺失骨骼。`npm test` **68/68**，官方源文件哈希不变。
+
+## P7：导出工作流与写操作安全
+
+- **`spine_export_workflow`**：一次调用完成「生成导出设置 → 多组 `-i/-e` 批量导出 → 可选产物校验」。未提供设置时自动生成到**系统临时目录**，导出结束默认删除；`dryRun:true` 只返回计划，不建目录、不写设置、不调用 CLI。工作流**不开启 `cleanUp`**，不改动源工程。工作流只做 `json` / `binary`：它的 `-o` 是目录语义，而渲染导出的 `-o` 是文件基名，批量跑会互相覆盖，所以 `png` / `mov` / `avi` / `gif` 请直接调 `spine_export`（见 P9）。
+- **binary 扩展名修正**：实测 3.8.75 的 `export-binary` 按 `extension` 决定产物名；此前设置里沿用 `.json`，产物内容是二进制但文件名误导。现已改为 **`.skel`**，并重新用官方 raptor 端到端验证。
+- **官方 raptor 实测**：同一工程一次导出 JSON + Binary（2 个 job），产物 `raptor-pro.json`、`raptor-pro.skel`、atlas 与 png 齐全；`verify:true` 对 `.json` / `.skel` 分别跑官方 `-i` Info，**骨骼 74 / 插槽 36 / 动画 5 全部匹配，ok=true**；源 `.spine` 哈希不变。
+- **写操作安全层**（`src/write-safety.mjs`）：所有 JSON 副本写操作统一走 `dryRun` 预览、顶层变更摘要（`changedSections` + 动画名级 added/removed/changed）、同目录临时文件 + rename 的**原子写入**；`overwrite:true` 覆盖旧输出前默认再备份一次并返回 `backupPath`。
+- **`spine_list_backups`**：只读列出系统临时目录 `spine-mcp-backups/` 下的写前备份（文件、疑似原目标、大小、时间），配合 `spine_restore_backup` 形成备份闭环。
+- `npm test` **73/73**。
+
+## P8：收尾与端到端验证
+
+- **全类型时间轴体检**：`spine_audit_project` 不再只检查骨骼和事件；slots / IK / transform / path / deform / drawOrder 的关键帧也检查 `time` 合法、严格递增与重复。官方 raptor 五个动画仍为 0 错误。
+- **导出工作流报告准确性**：自动生成的导出设置位于临时目录并在返回前删除，响应现在明确标记 `retained:false`、`path:null`、`temporaryPath` 与 `temporarySettingsDeleted:true`，不再给出已失效的路径。
+- **校验失败不掩盖导出**：导出成功后若 `verify` 因二次读取产物失败，返回 `verification.ok=false` + `error`，而不会把整个工作流标成失败。
+- **真实 MCP stdio 端到端**：以子进程启动 `src/index.mjs`，走 `initialize` / `tools/list` / `tools/call`，确认 32 个工具可见、官方 raptor 体检 0 问题、JSON+Binary 混合导出成功、`verify.ok=true`、临时设置已清理。
+- 官方源 `.spine` 与 `.json` 哈希均未变；`npm test` **73/73**。
+
+## P9：图片与视频导出
+
+三类导出设置都由 `spine_make_export_settings` 生成，类名从 3.8.75 字节码常量池读出后**逐个实测**：
+
+| `format` | 设置 `class` | `exportType` | 产物扩展名 | 实测结果 |
+|---|---|---|---|---|
+| `json` | `export-json` | — | `.json` | 通过 |
+| `binary` | `export-binary` | — | `.skel` | 通过 |
+| `png` | `export-png` | `image` | `.png` | 通过（raptor 8 帧、3.89 MB） |
+| `mov` | `export-mov` | `video` | `.mov` | 通过（464 KB，文件头 `ftypqt`） |
+| `avi` | `export-avi` | `video` | `.avi` | 通过（21.9 KB，文件头 `RIFF…AVI `） |
+| `gif` | `export-gif` | `video` | `.gif` | 通过（19.8 KB，文件头 `GIF89a`） |
+
+- **最大的坑是 `-o` 的语义不同**：数据导出的 `-o` 是**目录**，渲染导出的 `-o` 是**文件基名**。传 `D:/out/raptor` 会得到 `D:/out/raptor.mov`；传 `D:/out` 会得到与目录同级的 `D:/out.mov`，目录本身是空的——这正是首轮实测「导出成功但输出目录为空」的原因。
+- **例外**：`png` + `animationType: "all"` 时 `-o` 被当成目录，帧写进目录内，命名 `<skeleton>-<animation>_<帧号>.png`；`single` / `current` 时按文件基名处理，产出 `<基名>_<帧号>.png`。`outputPathKind()` 把这条规则显式化，工具返回值里直接给出。
+- **`extension` 字段对渲染格式无效**：写 `.mp4` 也照样得到 `.mov` / `.avi`，容器由 `class` 决定，不要自己再拼后缀。
+- **`spine_export` 现在会回报真实产物**：识别设置 `class` 属于渲染类后，按启动时间 + mtime 过滤，扫描「基名同级」与「基名目录内」两处，返回 `renderFormat` / `count` / `totalBytes` / `outputs[].path` / `scannedDirs`；一个都没找到时给出 `note` 说明原因，不再静默成功。渲染导出默认超时放宽到 600000 ms。
+- **已验证可用的渲染参数**：`animationType`(`all`/`single`/`current`)、`lastFrame`（实测 raptor 的 png 由 8 张变 13 张）、`msaa`（4 可用）、`backgroundColor`（必须转成 `{r,g,b,a}` 对象，直接写十六进制会被 CLI 拒绝：`Unable to convert value to required type: background`）。
+- **刻意不开放 `scale`**：实测它按「世界单位 → 像素」解释，`0.5` 会把 1281×1040 的图变成 13×11，与「相对自动适配的倍率」直觉完全不符，交给 CLI 自动适配更安全。
+- **`spine_export_workflow` 不接渲染格式**：它的 `-o` 是目录语义，多个 job 会互相覆盖；渲染导出直接用 `spine_export`。
+- `npm test` **81/81**。
 
 ## 与 GUI 联动（方案 C）
 
@@ -211,5 +277,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、IK 约束创建、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）都可在 JSON 副本上修改（P4 / P4b），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改与 P4b 的权重数值均由离线单测覆盖；**未验证**：图片 / 视频导出设置（格式未验证，不开放）、产物二进制内容级比对。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正与 P9 的 png / mov / avi / gif 渲染导出均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。

@@ -27,3 +27,28 @@ export function backupIfExists(filePath, enabled = true) {
   }
   return backupFile(filePath);
 }
+
+// 备份清单：只读列出 spine-mcp-backups 下的文件，按修改时间倒序。
+export function listBackups({ limit = 100 } = {}) {
+  if (!Number.isInteger(limit) || limit < 1) throw new Error('limit 必须是正整数');
+  const dir = backupDir();
+  if (!fs.existsSync(dir)) return { backupDir: dir, count: 0, files: [] };
+  const files = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.bak'))
+    .map((name) => {
+      const filePath = path.join(dir, name);
+      const stat = fs.statSync(filePath);
+      // <原文件名>.<ISO 时间戳>.bak
+      const match = /^(.*)\.\d{4}-\d{2}-\d{2}T.*\.bak$/.exec(name);
+      return {
+        file: filePath,
+        name,
+        likelyTarget: match ? match[1] : null,
+        sizeBytes: stat.size,
+        modifiedAt: stat.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt))
+    .slice(0, limit);
+  return { backupDir: dir, count: files.length, files };
+}

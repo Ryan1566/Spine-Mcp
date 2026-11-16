@@ -64,7 +64,48 @@ export function diffAnimations(base, other) {
   };
 }
 
-export function mergeAnimations(base, donor, { animationNames, overwrite = false } = {}) {
+function shiftTimes(value, offset, inKeyArray = false) {
+  if (Array.isArray(value)) {
+    for (const item of value) shiftTimes(item, offset, true);
+  } else if (value && typeof value === 'object') {
+    if (typeof value.time === 'number' || (inKeyArray && value.time === undefined)) {
+      value.time = Math.round(((value.time ?? 0) + offset) * 1e6) / 1e6;
+      if (value.time < 0) throw new Error(`timeOffset=${offset} 会产生负 time`);
+    }
+    for (const item of Object.values(value)) shiftTimes(item, offset);
+  }
+}
+
+function prepareMergedAnimation(base, sourceAnimation, { boneMap = {}, timeOffset = 0, skipMissingBones = false }) {
+  if (!boneMap || typeof boneMap !== 'object' || Array.isArray(boneMap)) throw new Error('boneMap 必须是 { donor骨骼名: base骨骼名 } 对象');
+  if (typeof timeOffset !== 'number' || !Number.isFinite(timeOffset)) throw new Error('timeOffset 必须是有限数字');
+  const animation = structuredClone(sourceAnimation);
+  const baseBones = new Set((base?.bones ?? []).map((bone) => bone?.name));
+  const missingBones = [];
+  const droppedBoneTracks = [];
+  const remappedBones = [];
+  const bones = {};
+  for (const [donorName, timelines] of Object.entries(animation.bones ?? {})) {
+    const targetName = boneMap[donorName] ?? donorName;
+    if (!baseBones.has(targetName)) {
+      missingBones.push(donorName);
+      if (skipMissingBones) {
+        droppedBoneTracks.push(donorName);
+        continue;
+      }
+      throw new Error(`合并动画引用了 base 不存在的骨骼: ${donorName}${targetName !== donorName ? ` -> ${targetName}` : ''}；可用 boneMap 映射或 skipMissingBones:true 跳过`);
+    }
+    if (bones[targetName]) throw new Error(`boneMap 把多个 donor 骨骼映射到同一个 base 骨骼: ${targetName}`);
+    bones[targetName] = timelines;
+    if (targetName !== donorName) remappedBones.push({ from: donorName, to: targetName });
+  }
+  if (Object.keys(bones).length) animation.bones = bones;
+  else delete animation.bones;
+  if (timeOffset !== 0) shiftTimes(animation, timeOffset);
+  return { animation, remappedBones, missingBones, droppedBoneTracks };
+}
+
+export function mergeAnimations(base, donor, { animationNames, overwrite = false, boneMap = {}, timeOffset = 0, skipMissingBones = false } = {}) {
   const json = structuredClone(base);
   json.animations ??= {};
   json.events ??= {};
@@ -73,6 +114,8 @@ export function mergeAnimations(base, donor, { animationNames, overwrite = false
   const merged = [];
   const skipped = [];
   const warnings = [];
+  const remappedBones = [];
+  const droppedBoneTracks = [];
 
   for (const name of names) {
     if (!(name in source)) {
@@ -83,7 +126,10 @@ export function mergeAnimations(base, donor, { animationNames, overwrite = false
       skipped.push(name);
       continue;
     }
-    json.animations[name] = structuredClone(source[name]);
+    const prepared = prepareMergedAnimation(base, source[name], { boneMap, timeOffset, skipMissingBones });
+    json.animations[name] = prepared.animation;
+    remappedBones.push(...prepared.remappedBones.map((item) => ({ animation: name, ...item })));
+    droppedBoneTracks.push(...prepared.droppedBoneTracks.map((bone) => ({ animation: name, bone })));
     merged.push(name);
   }
 
@@ -102,7 +148,7 @@ export function mergeAnimations(base, donor, { animationNames, overwrite = false
 
   return {
     json,
-    summary: { merged, skipped, eventsAdded, warnings, totalAnimations: Object.keys(json.animations).length },
+    summary: { merged, skipped, eventsAdded, warnings, remappedBones, droppedBoneTracks, timeOffset, totalAnimations: Object.keys(json.animations).length },
   };
 }
 

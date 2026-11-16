@@ -226,20 +226,23 @@ export function validateAnimation(skeleton, animationName) {
       let previous = -1;
       for (const key of keys) {
         keyframeCount += 1;
-        if (typeof key?.time !== 'number' || key.time < 0) {
+        // Spine JSON 会省略默认值，首帧 time=0 常写成 {}。
+        const time = key?.time ?? 0;
+        if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) {
           errors.push(`${bone}.${kind} 存在非法 time`);
           continue;
         }
-        if (key.time <= previous) errors.push(`${bone}.${kind} 的 time 未严格递增`);
-        previous = key.time;
-        maxTime = Math.max(maxTime, key.time);
+        if (time <= previous) errors.push(`${bone}.${kind} 的 time 未严格递增`);
+        previous = time;
+        maxTime = Math.max(maxTime, time);
       }
     }
   }
   for (const ev of anim.events ?? []) {
-    if (typeof ev?.time !== 'number' || ev.time < 0) errors.push(`事件 ${ev?.name} 的 time 非法`);
+    const time = ev?.time ?? 0;
+    if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) errors.push(`事件 ${ev?.name} 的 time 非法`);
     if (!skeleton.events?.[ev?.name]) errors.push(`顶层 events 缺少定义: ${ev?.name}`);
-    maxTime = Math.max(maxTime, ev?.time ?? 0);
+    maxTime = Math.max(maxTime, time);
   }
   if (!anim.bones && !anim.slots && !anim.events) warnings.push('动画没有任何时间轴或事件');
   if (maxTime > 120) warnings.push(`动画末尾时间 ${maxTime}s 偏长，请确认帧数与 fps`);

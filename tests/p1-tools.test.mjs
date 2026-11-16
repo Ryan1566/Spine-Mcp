@@ -75,7 +75,7 @@ test('工具表：写操作带 backup 参数，新工具与 binary 格式已开�
   for (const name of ['spine_export', 'spine_import_json', 'spine_clean']) {
     assert.ok(byName(name).inputSchema.properties.backup, `${name} 缺少 backup 参数`);
   }
-  assert.deepEqual(byName('spine_make_export_settings').inputSchema.properties.format.enum, ['json', 'binary']);
+  assert.deepEqual(byName('spine_make_export_settings').inputSchema.properties.format.enum, ['json', 'binary', 'png', 'mov', 'avi', 'gif']);
   assert.deepEqual(byName('spine_verify_export').inputSchema.required, ['projectPath', 'exportDir']);
   assert.ok(byName('spine_export').inputSchema.properties.extraInputs, '缺少批量导出参数');
 });

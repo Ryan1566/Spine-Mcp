@@ -18,14 +18,21 @@ import {
 } from './timeline.mjs';
 import { requestGuiReload, RELOAD_HINT } from './gui-link.mjs';
 import { projectInfo } from './project-info.mjs';
-import { makeExportSettings } from './export-settings.mjs';
-import { backupIfExists } from './backup.mjs';
+import { makeExportSettings, readExportClass, isRenderClass, formatForRenderClass } from './export-settings.mjs';
+import { collectRenderOutputs } from './render-outputs.mjs';
+import { backupIfExists, listBackups } from './backup.mjs';
 import { verifyExport } from './verify-export.mjs';
-import { packArgs, unpackArgs } from './atlas.mjs';
+import { assertDirectory, packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
 import { modifyBones } from './bone-ops.mjs';
 import { editWeights } from './weight-ops.mjs';
+import { auditProject } from './project-audit.mjs';
+import { inspectAnimation, editAnimation } from './animation-detail.mjs';
+import { modifySlots, modifySkins, inspectConstraints } from './structure-ops.mjs';
+import { inspectAtlas, auditAssets } from './asset-audit.mjs';
+import { writeJsonCopy } from './write-safety.mjs';
+import { runExportWorkflow } from './export-workflow.mjs';
 
 // 写 JSON 副本（而非 .spine）的工具统一提示人工 Import Data，不自动重载工程。
 const NEXT_STEP_IMPORT = '若要在 Spine 编辑器里查看，请手动 File → Import Data 导入这个 JSON 副本（不自动重载工程）。';
@@ -130,6 +137,8 @@ export const TOOLS = [
           },
         },
         overwrite: { type: 'boolean', description: '输出文件/同名动画已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览将写入的文件与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['sourceJsonPath', 'outputJsonPath', 'animationName', 'fps', 'frames'],
       additionalProperties: false,
@@ -150,15 +159,16 @@ export const TOOLS = [
   },
   {
     name: 'spine_export',
-    description: '调用官方 Spine CLI 导出工程。3.8.75 强制要求 -e 指向真实存在的导出设置 JSON。',
+    description: '调用官方 Spine CLI 导出工程。3.8.75 强制要求 -e 指向真实存在的导出设置 JSON。数据导出（export-json / export-binary）的 -o 是目录；渲染导出（export-png / export-mov / export-avi / export-gif）的 -o 是文件基名，扩展名由设置 class 决定，渲染导出会自动回传实际产出的文件清单。',
     inputSchema: {
       type: 'object',
       properties: {
         inputPath: { type: 'string', description: '.spine 工程绝对路径' },
-        outputDir: { type: 'string', description: '导出目录绝对路径' },
+        outputDir: { type: 'string', description: '输出路径：数据导出填目录；渲染导出填文件基名（不要带后缀，如 D:/out/raptor）' },
         exportSettingsPath: { type: 'string', description: '导出设置 JSON 绝对路径（必填，必须存在）' },
         clean: { type: 'boolean', description: '是否追加 -m 清理，默认 false' },
         backup: { type: 'boolean', description: 'clean:true 时写前备份源工程到系统临时目录，默认 true' },
+        timeoutMs: { type: 'number', description: '可选，CLI 超时毫秒数；默认 120000，渲染导出建议放宽到 600000' },
         extraInputs: {
           type: 'array',
           description: '可选，追加多组 -i/-e 实现批量导出（3.8.75 已实测支持混合 JSON / Binary）',
@@ -238,16 +248,20 @@ export const TOOLS = [
   },
   {
     name: 'spine_make_export_settings',
-    description: '生成 3.8.75 导出设置 JSON（供 spine_export 的 -e 使用）。`json` / `binary` 均已在本机验证；图片 / 视频格式未验证，不开放。',
+    description: '生成 3.8.75 导出设置 JSON（供 spine_export 的 -e 使用）。数据导出 json / binary 与渲染导出 png / mov / avi / gif 均已在本机 3.8.75 真实导出验证。',
     inputSchema: {
       type: 'object',
       properties: {
         outputPath: { type: 'string', description: '设置文件输出绝对路径（新文件）' },
-        outputDir: { type: 'string', description: '写入 settings.output；spine_export 的 -o 会覆盖它' },
-        format: { type: 'string', enum: ['json', 'binary'], description: '导出格式；json 与 binary 均已在本机 3.8.75 验证，图片 / 视频未开放' },
-        prettyPrint: { type: 'boolean', description: '默认 true' },
-        nonessential: { type: 'boolean', description: '默认 true' },
-        cleanUp: { type: 'boolean', description: '默认 false；true 会在导出时清理动画，勿对原件开启' },
+        outputDir: { type: 'string', description: '写入 settings.output；仅 json / binary 有意义（spine_export 的 -o 会覆盖它）' },
+        format: { type: 'string', enum: ['json', 'binary', 'png', 'mov', 'avi', 'gif'], description: '导出格式；png / mov / avi / gif 为渲染导出，-o 会被当成文件基名' },
+        prettyPrint: { type: 'boolean', description: '默认 true；仅 json / binary' },
+        nonessential: { type: 'boolean', description: '默认 true；仅 json / binary' },
+        cleanUp: { type: 'boolean', description: '默认 false；true 会在导出时清理动画，勿对原件开启（仅 json / binary）' },
+        animationType: { type: 'string', enum: ['all', 'single', 'current'], description: '渲染导出用：all 逐动画逐帧，single / current 只出单张；png + all 时 -o 会被当目录' },
+        lastFrame: { type: 'boolean', description: '渲染导出用：true 时输出动画的每一帧（实测 raptor 的 png 由 8 张变 13 张）' },
+        msaa: { type: 'number', description: '渲染导出用：多重采样，实测 4 可用，0 表示关闭' },
+        backgroundColor: { type: 'string', description: '渲染导出用：#RRGGBB 或 #RRGGBBAA，会转成 CLI 要求的 {r,g,b,a} 对象' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
       },
       required: ['outputPath'],
@@ -334,7 +348,12 @@ export const TOOLS = [
         donorJsonPath: { type: 'string', description: '提供动画的 skeleton JSON 绝对路径' },
         outputJsonPath: { type: 'string', description: '输出 JSON 绝对路径（新文件）' },
         animationNames: { type: 'array', items: { type: 'string' }, description: '可选，只合并指定动画；默认全部' },
+        boneMap: { type: 'object', description: '可选，donor 骨骼名到 base 骨骼名的映射，如 {"arm":"upper_arm"}', additionalProperties: { type: 'string' } },
+        timeOffset: { type: 'number', description: '可选，合并动画的所有关键帧统一平移的秒数，默认 0；不得产生负 time' },
+        skipMissingBones: { type: 'boolean', description: '默认 false；true 时丢弃映射后仍不存在于 base 的骨骼轨道并记录报告' },
         overwrite: { type: 'boolean', description: '同名动画是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['baseJsonPath', 'donorJsonPath', 'outputJsonPath'],
       additionalProperties: false,
@@ -359,6 +378,8 @@ export const TOOLS = [
         },
         definitions: { type: 'object', description: '可选，add 时按事件名提供定义对象' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['sourceJsonPath'],
       additionalProperties: false,
@@ -380,6 +401,8 @@ export const TOOLS = [
         eventFrames: { type: 'array', items: eventFrameSchema },
         skipMissingBones: { type: 'boolean', description: '默认 false；true 时自动过滤各 skeleton 不存在的骨骼控制' },
         overwrite: { type: 'boolean', description: '输出文件已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览各输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['sourceJsonPaths', 'outputDir', 'animationName', 'fps', 'frames'],
       additionalProperties: false,
@@ -410,6 +433,8 @@ export const TOOLS = [
         reparentChildren: { type: 'boolean', description: 'remove 时自动把子骨骼接到被删骨骼的父级，默认 false' },
         dropAnimationTracks: { type: 'boolean', description: 'remove 时自动删除引用该骨骼的动画时间轴，默认 false' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['sourceJsonPath'],
       additionalProperties: false,
@@ -427,8 +452,220 @@ export const TOOLS = [
         bone: { type: ['string', 'integer'], description: 'scale 模式必填：骨骼名或全局下标' },
         factor: { type: 'number', exclusiveMinimum: 0, description: 'scale 模式的权重倍率，如 0.8 / 1.2' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
       },
       required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_audit_project',
+    description: '只读体检 skeleton JSON：骨骼/插槽/附件/网格/权重引用与结构、全部动画时间轴和事件定义。返回 errors/warnings 与定位信息，不写文件、不调用 Spine。',
+    inputSchema: {
+      type: 'object',
+      properties: { jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' } },
+      required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_inspect_animation',
+    description: '只读查看一条动画的完整时间轴明细：bones/slots/IK/transform/path/deform/events/drawOrder，包含关键帧、曲线类型、起止时间与总时长。可限制关键帧返回数量。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' },
+        animationName: { type: 'string', description: '动画名' },
+        includeKeyframes: { type: 'boolean', description: '是否返回关键帧内容，默认 true；false 只返回摘要' },
+        maxKeyframes: { type: 'integer', minimum: 1, description: '最多返回的关键帧总数，默认 1000；原始统计不受截断影响' },
+      },
+      required: ['jsonPath', 'animationName'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_edit_animation',
+    description: '在 JSON 副本上编辑一条动画：duplicate / rename / remove / shift（秒）/ scale（时长倍率）/ crop（时间区间）。覆盖所有时间轴类型；crop 不自动补边界插值帧。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径' },
+        outputJsonPath: { type: 'string', description: '输出 JSON 副本绝对路径' },
+        animationName: { type: 'string', description: '要编辑的动画名' },
+        mode: { type: 'string', enum: ['duplicate', 'rename', 'remove', 'shift', 'scale', 'crop'] },
+        newName: { type: 'string', description: 'duplicate / rename 模式必填' },
+        offset: { type: 'number', description: 'shift 模式必填，单位秒，可为负数但不能产生负 time' },
+        scale: { type: 'number', exclusiveMinimum: 0, description: 'scale 模式必填，如 0.5 加速一倍、2 延长一倍' },
+        start: { type: 'number', minimum: 0, description: 'crop 模式必填，区间起点秒（含）' },
+        end: { type: 'number', exclusiveMinimum: 0, description: 'crop 模式必填，区间终点秒（含）' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
+      },
+      required: ['sourceJsonPath', 'outputJsonPath', 'animationName', 'mode'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_edit_slots',
+    description: '在 JSON 副本上修改插槽：`list` 只读 / `add` / `remove`（引用保护）/ `rename`（同步皮肤与动画）/ `set`（bone/attachment/color/dark/blend）/ `reorder`（draw order）。不写 `.spine`。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径' },
+        outputJsonPath: { type: 'string', description: 'list 模式可省略；其余模式必填' },
+        mode: { type: 'string', enum: ['list', 'add', 'remove', 'rename', 'set', 'reorder'], description: '默认 list' },
+        slots: {
+          type: 'array',
+          description: 'add: { name, bone, ...字段 }；remove: 插槽名或对象；set: { name, ...字段 }',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              bone: { type: 'string' },
+              attachment: { type: ['string', 'null'] },
+              color: { type: 'string' },
+              dark: { type: 'string' },
+              blend: { type: 'string' },
+            },
+            required: ['name'],
+            additionalProperties: false,
+          },
+        },
+        rename: {
+          type: 'object',
+          properties: { from: { type: 'string' }, to: { type: 'string' } },
+          required: ['from', 'to'],
+          additionalProperties: false,
+        },
+        order: { type: 'array', items: { type: 'string' }, description: 'reorder 模式必填：全部插槽名的新顺序，不得遗漏或重复' },
+        dropAttachments: { type: 'boolean', description: 'remove 时是否一并删除皮肤里该插槽的附件，默认 false' },
+        dropAnimationTracks: { type: 'boolean', description: 'remove 时是否清理 slots/deform/drawOrder 引用，默认 false' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
+      },
+      required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_edit_skins',
+    description: '在 JSON 副本上修改皮肤与附件分配：`list` 只读 / `add` / `remove`（deform 引用保护）/ `rename` / `assign`（按插槽设置或删除附件）。不写 `.spine`。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径' },
+        outputJsonPath: { type: 'string', description: 'list 模式可省略；其余模式必填' },
+        mode: { type: 'string', enum: ['list', 'add', 'remove', 'rename', 'assign'], description: '默认 list' },
+        skins: { type: 'array', items: { type: 'string' }, description: 'add / remove 的皮肤名数组；add 可传字符串' },
+        rename: {
+          type: 'object',
+          properties: { from: { type: 'string' }, to: { type: 'string' } },
+          required: ['from', 'to'],
+          additionalProperties: false,
+        },
+        attachments: {
+          type: 'array',
+          description: 'assign 模式：按 { skin, slot, name, attachment } 设置附件；attachment 传 null 表示删除',
+          items: {
+            type: 'object',
+            properties: {
+              skin: { type: 'string' },
+              slot: { type: 'string' },
+              name: { type: 'string' },
+              attachment: { type: 'object', description: '3.8.75 附件对象（region / mesh / linkedmesh 等）' },
+            },
+            required: ['skin', 'slot', 'name', 'attachment'],
+            additionalProperties: false,
+          },
+        },
+        dropDeformTracks: { type: 'boolean', description: 'remove 时是否清理对应 deform 动画轨道，默认 false' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只预览输出与变更摘要，不写文件' },
+        backup: { type: 'boolean', description: 'overwrite 覆盖旧输出前是否备份，默认 true' },
+      },
+      required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_inspect_constraints',
+    description: '只读检查 IK / transform / path 约束：定义、骨骼引用、缺失骨骼与被哪些动画时间轴使用。不写文件。',
+    inputSchema: {
+      type: 'object',
+      properties: { jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' } },
+      required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_inspect_atlas',
+    description: '只读解析 .atlas 文件：页面、region 矩形、重名、越界、重叠与页图片存在性。不解码图片、不写文件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        atlasPath: { type: 'string', description: '.atlas 文件绝对路径' },
+        imageDir: { type: 'string', description: '可选，页图片所在目录；默认取 atlas 文件所在目录' },
+      },
+      required: ['atlasPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_audit_assets',
+    description: '只读审计 skeleton 附件与图集 / 散图的对应关系：setup 与动画引用的附件、图集缺失 region、未被引用的 region、图片文件存在性。不写文件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' },
+        atlasPaths: { type: 'array', items: { type: 'string' }, description: '可选，一个或多个 .atlas 文件绝对路径' },
+        imageDir: { type: 'string', description: '可选，散图目录；不提供则跳过散图存在性检查' },
+      },
+      required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_export_workflow',
+    description: '批量导出工作流：自动生成已验证的 json / binary 导出设置（临时目录，默认用后删除）、一次 CLI 调用多组 -i/-e、可选产物校验。支持 dryRun；不开启 cleanUp，不改源工程。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: '主 .spine 工程绝对路径' },
+        outputDir: { type: 'string', description: '导出输出目录绝对路径' },
+        format: { type: 'string', enum: ['json', 'binary'], description: '主工程导出格式，默认 json；图片 / 视频未验证不开放' },
+        exportSettingsPath: { type: 'string', description: '可选，主工程已有导出设置 JSON；不提供则自动生成' },
+        extraInputs: {
+          type: 'array',
+          description: '可选，追加批量导出输入；同一工程可重复出现以导出多种格式',
+          items: {
+            type: 'object',
+            properties: {
+              inputPath: { type: 'string', description: '工程或数据文件绝对路径' },
+              format: { type: 'string', enum: ['json', 'binary'], description: '默认沿用主 format' },
+              exportSettingsPath: { type: 'string', description: '可选，已有导出设置 JSON' },
+            },
+            required: ['inputPath'],
+            additionalProperties: false,
+          },
+        },
+        prettyPrint: { type: 'boolean', description: '生成 JSON 设置时是否 prettyPrint，默认 true' },
+        nonessential: { type: 'boolean', description: '生成设置时是否包含 nonessential，默认 true' },
+        verify: { type: 'boolean', description: '导出成功后是否用官方 -i Info 校验产物，默认 false' },
+        dryRun: { type: 'boolean', description: 'true 时只返回计划，不建目录、不写设置、不调用 CLI' },
+      },
+      required: ['projectPath', 'outputDir'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_list_backups',
+    description: '只读列出系统临时目录 spine-mcp-backups 下的写前备份：文件、疑似原目标、大小、时间，按时间倒序。',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', minimum: 1, description: '最多返回条数，默认 100' } },
       additionalProperties: false,
     },
   },
@@ -521,9 +758,15 @@ export async function callTool(name, args = {}) {
         slotKeys: args.slotKeys ?? [],
         overwrite: args.overwrite === true,
       });
-      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
-      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
     }
 
     case 'spine_validate_timeline': {
@@ -539,11 +782,25 @@ export async function callTool(name, args = {}) {
         clean: args.clean === true,
         extraInputs: args.extraInputs ?? [],
       });
+      // 渲染导出要靠 mtime 认本次产物，必须在启动 CLI 之前取时间点。
+      const startedAt = Date.now();
+      const settingsClass = await readExportClass(args.exportSettingsPath).catch(() => null);
+      const renderFormat = isRenderClass(settingsClass) ? formatForRenderClass(settingsClass) : null;
       const cleaning = args.clean === true;
       const backupPath = backupIfExists(args.inputPath, cleaning && args.backup !== false);
-      const result = await runSpine(cliArgs);
+      const timeoutMs = Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
+        ? args.timeoutMs
+        : (renderFormat ? 600000 : 120000);
+      const result = await runSpine(cliArgs, { timeoutMs });
+      const withOutputs = result.success && renderFormat
+        ? {
+          ...result,
+          renderFormat,
+          ...(await collectRenderOutputs({ outputPath: args.outputDir, format: renderFormat, startedAt })),
+        }
+        : result;
       // clean:true 会追加 -m，可能改动源工程，此时必须提示人工重载。
-      return withBackup(cleaning ? withReloadHint(result) : result, backupPath);
+      return withBackup(cleaning ? withReloadHint(withOutputs) : withOutputs, backupPath);
     }
 
     case 'spine_import_json': {
@@ -587,6 +844,10 @@ export async function callTool(name, args = {}) {
         prettyPrint: args.prettyPrint,
         nonessential: args.nonessential,
         cleanUp: args.cleanUp,
+        animationType: args.animationType,
+        lastFrame: args.lastFrame,
+        msaa: args.msaa,
+        backgroundColor: args.backgroundColor,
         overwrite: args.overwrite === true,
       });
     }
@@ -632,11 +893,20 @@ export async function callTool(name, args = {}) {
       const donor = await readJson(args.donorJsonPath);
       const { json, summary } = mergeAnimations(base, donor, {
         animationNames: args.animationNames,
+        boneMap: args.boneMap ?? {},
+        timeOffset: args.timeOffset ?? 0,
+        skipMissingBones: args.skipMissingBones === true,
         overwrite: args.overwrite === true,
       });
-      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
-      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+      const written = await writeJsonCopy({
+        sourceSkeleton: base,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
     }
 
     case 'spine_manage_events': {
@@ -650,9 +920,15 @@ export async function callTool(name, args = {}) {
       });
       if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, events };
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
-      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
-      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
     }
 
     case 'spine_build_batch_animations': {
@@ -675,15 +951,19 @@ export async function callTool(name, args = {}) {
       });
       const written = [];
       for (const item of results) {
-        const out = assertWritableOutput(
-          path.join(args.outputDir, `${item.name}.${args.animationName}.json`),
-          'outputJsonPath',
-          args.overwrite === true,
-        );
-        await fs.writeFile(out, `${JSON.stringify(item.json, null, 2)}\n`, 'utf8');
-        written.push({ file: out, skeleton: item.name, ...item.summary });
+        const out = path.join(args.outputDir, `${item.name}.${args.animationName}.json`);
+        const result = await writeJsonCopy({
+          sourceSkeleton: item.skeleton,
+          outputJsonPath: out,
+          json: item.json,
+          overwrite: args.overwrite === true,
+          dryRun: args.dryRun === true,
+          backup: args.backup !== false,
+        });
+        written.push({ file: out, skeleton: item.name, ...item.summary, ...result });
       }
-      return { outputDir: args.outputDir, written, failures, nextStep: NEXT_STEP_IMPORT };
+      const dryRun = args.dryRun === true;
+      return { outputDir: args.outputDir, written, failures, ...(dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }) };
     }
 
     case 'spine_modify_bones': {
@@ -699,9 +979,15 @@ export async function callTool(name, args = {}) {
       });
       if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, bones };
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
-      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
-      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
     }
 
     case 'spine_edit_weights': {
@@ -714,9 +1000,144 @@ export async function callTool(name, args = {}) {
       });
       if (mode === 'inspect') return { sourceJsonPath: args.sourceJsonPath, ...report };
       if (!args.outputJsonPath) throw new Error('非 inspect 模式必须提供 outputJsonPath');
-      const outputPath = assertWritableOutput(args.outputJsonPath, 'outputJsonPath', args.overwrite === true);
-      await fs.writeFile(outputPath, `${JSON.stringify(json, null, 2)}\n`, 'utf8');
-      return { writtenTo: outputPath, sourceUnchanged: true, nextStep: NEXT_STEP_IMPORT, ...summary };
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
+    }
+
+    case 'spine_audit_project': {
+      const skeleton = await readJson(args.jsonPath);
+      return { jsonPath: args.jsonPath, ...auditProject(skeleton) };
+    }
+
+    case 'spine_inspect_animation': {
+      const skeleton = await readJson(args.jsonPath);
+      return {
+        jsonPath: args.jsonPath,
+        ...inspectAnimation(skeleton, args.animationName, {
+          includeKeyframes: args.includeKeyframes !== false,
+          maxKeyframes: args.maxKeyframes ?? 1000,
+        }),
+      };
+    }
+
+    case 'spine_edit_animation': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const { json, summary } = editAnimation(skeleton, {
+        mode: args.mode,
+        animationName: args.animationName,
+        newName: args.newName,
+        offset: args.offset,
+        scale: args.scale,
+        start: args.start,
+        end: args.end,
+      });
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
+    }
+
+    case 'spine_edit_slots': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const mode = args.mode ?? 'list';
+      const { json, summary, slots } = modifySlots(skeleton, {
+        mode,
+        slots: args.slots ?? [],
+        rename: args.rename,
+        order: args.order,
+        dropAttachments: args.dropAttachments === true,
+        dropAnimationTracks: args.dropAnimationTracks === true,
+      });
+      if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, slots };
+      if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
+    }
+
+    case 'spine_edit_skins': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const mode = args.mode ?? 'list';
+      const { json, summary, skins } = modifySkins(skeleton, {
+        mode,
+        skins: args.skins ?? [],
+        rename: args.rename,
+        attachments: args.attachments ?? [],
+        dropDeformTracks: args.dropDeformTracks === true,
+      });
+      if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, skins };
+      if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return { ...written, ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }), ...summary };
+    }
+
+    case 'spine_inspect_constraints': {
+      const skeleton = await readJson(args.jsonPath);
+      return { jsonPath: args.jsonPath, ...inspectConstraints(skeleton) };
+    }
+
+    case 'spine_inspect_atlas': {
+      const atlasPath = assertSafePath(args.atlasPath, 'atlasPath', { mustExist: true });
+      const imageDir = args.imageDir ? assertDirectory(args.imageDir, 'imageDir') : path.dirname(atlasPath);
+      const text = await fs.readFile(atlasPath, 'utf8');
+      return inspectAtlas(text, { source: atlasPath, imageDir });
+    }
+
+    case 'spine_audit_assets': {
+      const skeleton = await readJson(args.jsonPath);
+      const atlasPaths = args.atlasPaths ?? [];
+      if (!Array.isArray(atlasPaths)) throw new Error('atlasPaths 必须是数组');
+      const atlasReports = [];
+      for (const [index, atlasPath] of atlasPaths.entries()) {
+        const safePath = assertSafePath(atlasPath, `atlasPaths[${index}]`, { mustExist: true });
+        const text = await fs.readFile(safePath, 'utf8');
+        atlasReports.push(inspectAtlas(text, { source: safePath, imageDir: path.dirname(safePath) }));
+      }
+      const imageDir = args.imageDir ? assertDirectory(args.imageDir, 'imageDir') : null;
+      return { jsonPath: args.jsonPath, ...auditAssets({ skeleton, atlasReports, imageDir }) };
+    }
+
+    case 'spine_export_workflow': {
+      return runExportWorkflow({
+        projectPath: args.projectPath,
+        outputDir: args.outputDir,
+        format: args.format,
+        exportSettingsPath: args.exportSettingsPath,
+        extraInputs: args.extraInputs ?? [],
+        prettyPrint: args.prettyPrint,
+        nonessential: args.nonessential,
+        verify: args.verify === true,
+        dryRun: args.dryRun === true,
+      });
+    }
+
+    case 'spine_list_backups': {
+      return listBackups({ limit: args.limit ?? 100 });
     }
 
     default:
