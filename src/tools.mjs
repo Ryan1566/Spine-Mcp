@@ -233,13 +233,13 @@ export const TOOLS = [
   },
   {
     name: 'spine_reload_gui',
-    description: '方案 C：CLI 改写工程后，请求 Spine GUI 重新打开该工程。走官方 Editor 模式（Spine.exe <工程路径>），不模拟鼠标键盘、不改动工程文件。Spine 3.8.75 有单实例锁：检测到已有 GUI 时默认阻止启动并返回可选做法；dryRun=true 只返回计划。',
+    description: '方案 C：请求 Spine GUI 打开 / 重新打开指定 .spine 工程。走官方 Editor 模式（Spine.exe <工程路径>），不模拟鼠标键盘、不改动工程文件。实测 3.8.75 在 GUI 已运行时会由新进程把路径转发给已有实例后自行退出，原窗口随即加载该工程，因此默认放行；dryRun=true 只返回计划。',
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string', description: '要重新打开的 .spine 工程绝对路径（必须存在）' },
+        projectPath: { type: 'string', description: '要打开的 .spine 工程绝对路径（必须存在）' },
         dryRun: { type: 'boolean', description: '默认 false；true 时只返回将要执行的命令与参数，不启动 GUI' },
-        allowWhenRunning: { type: 'boolean', description: '默认 false；已有 GUI 实例时仍强制尝试启动（通常会被单实例锁拒绝）' },
+        allowWhenRunning: { type: 'boolean', description: '默认 true（会把路径转发给已有 GUI 实例）；传 false 恢复保守行为，锁探测到 GUI 在跑时直接返回 blocked' },
       },
       required: ['projectPath'],
       additionalProperties: false,
@@ -897,7 +897,7 @@ export async function callTool(name, args = {}) {
       return requestGuiReload({
         projectPath: args.projectPath,
         dryRun: args.dryRun === true,
-        allowWhenRunning: args.allowWhenRunning === true,
+        allowWhenRunning: args.allowWhenRunning !== false,
       });
     }
 

@@ -107,11 +107,27 @@ test('detectGuiLock：无用户目录或锁文件不存在时不判定为运行�
   assert.equal(detectGuiLock({ USERPROFILE: path.join(here, 'no-such-home') }).guiRunning, false);
 });
 
-test('已有 GUI 实例时默认阻止启动，不产生无效进程', async () => {
-  const forbid = () => { throw new Error('GUI 运行时不应调用 spawn'); };
+test('已有 GUI 实例时默认放行：实测会把工程路径转发给已有实例', async () => {
   const running = { guiRunning: true, lockPath: 'C:/fake/Spine/.lock', reason: 'test' };
   const result = await requestGuiReload({
     projectPath: existingFile,
+    env: { SPINE_GUI_EXE: process.execPath },
+    spawnImpl: fakeSpawn,
+    lockProbe: () => running,
+  });
+  assert.equal(result.blocked, false);
+  assert.equal(result.wouldBlock, false);
+  assert.equal(result.launched, true);
+  assert.equal(result.guiRunning, true);
+  assert.match(result.verifyHint, /工程名 - Spine/);
+});
+
+test('allowWhenRunning=false 恢复保守行为，不产生无效进程', async () => {
+  const forbid = () => { throw new Error('保守模式下不应调用 spawn'); };
+  const running = { guiRunning: true, lockPath: 'C:/fake/Spine/.lock', reason: 'test' };
+  const result = await requestGuiReload({
+    projectPath: existingFile,
+    allowWhenRunning: false,
     env: { SPINE_GUI_EXE: process.execPath },
     spawnImpl: forbid,
     lockProbe: () => running,
@@ -120,16 +136,4 @@ test('已有 GUI 实例时默认阻止启动，不产生无效进程', async () 
   assert.equal(result.wouldBlock, true);
   assert.equal(result.launched, false);
   assert.match(result.hint, /单实例锁/);
-});
-
-test('allowWhenRunning=true 时仍会尝试启动', async () => {
-  const result = await requestGuiReload({
-    projectPath: existingFile,
-    allowWhenRunning: true,
-    env: { SPINE_GUI_EXE: process.execPath },
-    spawnImpl: fakeSpawn,
-    lockProbe: () => ({ guiRunning: true, lockPath: 'C:/fake/Spine/.lock', reason: 'test' }),
-  });
-  assert.equal(result.blocked, false);
-  assert.equal(result.launched, true);
 });

@@ -321,10 +321,11 @@ CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不�
 
 - `dryRun: true`（建议先用）返回 `strategy` / `guiExe` / `args` / `guiRunning` / `wouldBlock`，不启动任何进程。
 - 实际执行时以 `detached` 方式 spawn `Spine.exe <工程路径>`，不等待 GUI 退出。`guiExe` 优先取环境变量 `SPINE_GUI_EXE`，否则把 `SPINE_EXE` 同目录的 `.com` 换成 `.exe`；**不提供「启动任意程序」的参数**。
-- **本机实测（3.8.75）**：GUI 已运行时再启动 `Spine.exe` **不会转发工程路径**。launcher 会因单实例锁 `C:\Users\<user>\Spine\.lock` 报 `WARNING: Unable to obtain file lock` / `FileNotFoundException ... 拒绝访问` 后退出，原窗口标题与 `recent.json` 都不变——「CLI 改盘 → GUI 自动刷新」这条官方路径并不存在。
-- 因此工具默认做锁检测：对 `.lock` 以 `r+` 打开，被占用（`EPERM`）即判定已有 GUI；这是只读探测，不改锁文件。检测到已有实例时返回 `blocked: true` / `launched: false` 与 `hint`，**不产生注定失败的进程**；`allowWhenRunning: true` 可强制尝试。
-- 可行的联动路径：① 在 GUI 里手动 `Ctrl+O` 重新打开（或用 `Import Data` 导入生成的 JSON）；② 先在编辑器 `Ctrl+S` 并关闭 GUI，再调用本工具以 Editor 模式重新打开工程（此时无锁，能成功）；③ 若一定要在 GUI 开着时自动重载，需要 UI 自动化层模拟 `Ctrl+O`，本版不做。
-- **不模拟鼠标键盘、不读写工程文件、不自动保存**。GUI 里若有未保存改动，先手动 `Ctrl+S`，否则重新打开后会被磁盘版本覆盖。
+- **本机实测（3.8.75，2026-11-16 复核，推翻了早期结论）**：GUI 已运行时再启动 `Spine.exe <工程路径>`，新进程会把路径**转发给已有实例**后自行退出，原窗口随即加载该工程——窗口标题从 `Spine` 变成 `Spine - 工程名`。本次实测：原实例 pid 14876 标题由 `Spine` 变成 `Spine - spinemcp_test`，新起的 9332 在几秒内退出。所以单实例锁的表现是「转发」而不是「拒绝」，工程是能被打开 / 切换的；早期以为的「不转发」是只看了新进程存活与否，没看原窗口标题。
+- **锁探测不可靠**：Spine 是 Java 应用，`.lock` 走 java.nio 区间锁，不独占文件句柄，所以 `detectGuiLock` 的 `r+` 探测在有 GUI 时依然成功，**判断不出「GUI 正在运行」**。该字段只作参考，不用于阻断启动。
+- **默认放行**：`allowWhenRunning` 默认 `true`，直接 spawn 即可，转发由 Spine 自己完成；传 `false` 恢复保守行为，探测到锁被占用就返回 `blocked: true` / `launched: false` 与 `hint`，不产生进程。启动成功时返回 `verifyHint`，提示用窗口标题确认是否真的打开。
+- 仍然成立：CLI 写盘后 GUI **不会自动刷新**（没有 watch / reload 参数），需要主动调用本工具或手动 `Ctrl+O`；GUI 里若有未保存改动，先 `Ctrl+S`，否则重新打开会被磁盘版本覆盖。
+- **不模拟鼠标键盘、不读写工程文件、不自动保存**。
 - 文件监听式自动重载（检测到 `.spine` 变化就自动触发）尚未实现，避免后台抢焦点，可作为后续扩展。
 
 ## 典型工作流：8 帧普攻、F3 命中
