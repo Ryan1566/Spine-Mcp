@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 36 个工具
+## 38 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -77,6 +77,8 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_make_export_settings` | 生成导出设置 JSON：数据导出 `json` / `binary`，渲染导出 `png` / `mov` / `avi` / `gif`，均已实测 | 否 |
 | `spine_verify_export` | 只读比对源工程与导出目录产物（`.json` 走 CLI、`.skel` 走本地解析）的骨骼 / 插槽 / 动画 / IK 列表 | 是 |
 | `spine_render_preview` | 一行式渲染预览：给工程与输出目录就出图，自动生成并清理临时导出设置 | 是 |
+| `spine_get_wireframe` | 求解 setup pose 或「动画 + 秒数」时刻的骨架：回传骨骼世界变换、面片顶点世界坐标、region 可见四边形，可出 SVG / 自包含 HTML | 否 |
+| `spine_align_check` | 把线框等比贴合到渲染图前景，回传骨骼命中率、面片重心命中数、三角面覆盖 IoU 与随机基准 | 否 |
 | `spine_pack_atlas` | 图集打包（`-i/-o/-p`，可选 `-j`/`-n`），支持图集名或 pack.json | 是 |
 | `spine_unpack_atlas` | 图集解包（`-i/-o/-c`），把 atlas 页还原成散图 | 是 |
 | `spine_restore_backup` | 把写前备份恢复回 `.spine` 工程，需 `overwrite:true`，恢复前再备份当前目标 | 否 |
@@ -347,6 +349,72 @@ header → 字符串表 → bones → slots → ik → transform → path
 **官方实测**：`citizen_001` 16 个 mesh / 76 顶点 / 46 三角面，全部加权；`bone_head` 影响 `face`、`neck`、`hair` 三个面片共 12 个顶点、权重和 11.7615。`spine_render_preview` 出 6 张 png（141×115 等），4.9 秒，文件名形如 `citizen_001-Idle_Normal_Test_001_0.png`，与 `body.png` 的米黄配色一致，结构数据与渲染结果吻合。
 
 `npm test` **119/119**（新增 `tests/p14-mesh.test.mjs` 11 例，覆盖统计、面片 / 顶点明细、骨骼反查、拓扑异常、双 skin 格式兼容、`-o` 语义与 dryRun 不落盘）。
+
+
+## P15：动画采样与线框叠加校验
+
+P14 解决了「面片是什么」，但**画面和结构数据对不上时无法定位**：`spine_inspect_mesh` 给的是 setup pose 的静态结构，而渲染图是动画某一帧，两者本来就不该完全重合。P15 补上中间那层——把「某一时刻的骨架姿态」算出来。
+
+两个新工具都是**纯本地计算**，不调 CLI、不写工程：
+
+| 工具 | 干什么 |
+|---|---|
+| `spine_get_wireframe` | setup pose 或 `animation` + `time` 时刻 → 骨骼世界变换 / 面片顶点世界坐标 / region 可见四边形，可直出 SVG 或自包含 HTML |
+| `spine_align_check` | 把线框等比贴合到渲染图前景，算出**可比较的数字**，而不是靠肉眼说「看着差不多」 |
+
+### 3.8 的三个数值语义（都踩过）
+
+| 事实 | 后果 |
+|---|---|
+| 时间线值是**相对 setup pose 的偏移**：rotate / translate / shear 相加，scale 相乘 | 按绝对值算会把骨骼翻到另一侧。`bone_arm_r_01` setup=180°、首帧 `rotate.angle=-10.06` → 169.94°；取 -10.06° 手臂直接反向 |
+| 贝塞尔控制点**不在数组里**：`curve` 是 cx1，另三点在同级字段 `c2`/`c3`/`c4`，默认 `0/1/1` | 按 4.x 的四点数组写会全部退化成线性插值，快慢节奏丢失 |
+| `bones[].parent` 是**骨骼名字符串**，不是下标 | 按 `world[parent]` 取会全部 `undefined`，每根骨骼都被当根骨骼，只保留局部坐标 |
+| region 的 `width/height` 是**未裁剪帧**尺寸 | 武器 `128×128` 实际只露 `42×6`，按整帧画包围盒会被撑成两倍高 |
+
+### 对齐校验怎么打分
+
+1. 取渲染图前景盒（有 alpha 走 alpha，不透明背景走「与角落颜色差」）；
+2. 把线框**内容盒**（只含面片顶点 + region 可见四角，不含骨骼）等比映射到前景盒；
+3. 统计三项：骨骼沿线 25 点命中率、面片重心命中数、三角面覆盖掩膜与前景掩膜的 **IoU**。
+
+IoU 是关键——命中率只能证明「落在轮廓里」，IoU 能区分「姿态算对了」和「碰巧压在色块上」。
+
+**官方实测**（`citizen_001`，43×61 像素前景）：
+
+| 场景 | IoU | 骨骼命中率 | 面片重心 |
+|---|---|---|---|
+| setup pose | 0.814 | 0.988 | 16/16 |
+| `Idle_Normal_Test_001` @ 0s | **0.928** | 0.990 | 16/16 |
+| `Idle_Normal_Test_001` @ 1.0s（对第二帧渲染图） | **0.927** | 1.000 | 16/16 |
+| `Attack_Sword_Test_Light_001` @ 0s | 0.915 | 1.000 | 16/16 |
+| `Run_Normal_Test_001` @ 0s | 0.881 | 0.995 | 16/16 |
+
+同一张图上 setup 0.814 → 动画首帧 0.928，这就是采样引擎正确性的直接证据（差 11 个点，远超噪声）。
+
+### 用法
+
+```jsonc
+// 看某个时刻的线框，直接落成可打开的页面
+{ "jsonPath": ".../citizen_001.json", "animation": "Attack_Sword_Test_Light_001", "time": 0.4,
+  "format": "html", "outPath": "D:/out/attack.html" }
+
+// 先出图，再对着算
+{ "jsonPath": ".../citizen_001.json", "renderPng": ".../citizen_001-Idle_Normal_Test_001_0.png",
+  "animation": "Idle_Normal_Test_001", "time": 0, "outHtml": "D:/out/align.html" }
+```
+
+- `atlasPath` 不传时会在 JSON 同目录自动找 `同名.atlas.txt` / `同名.atlas` / 目录下任意 atlas；都找不到也能画，只是 region 按完整帧算、包围盒偏大。
+- `format: "summary"` 只给统计与坐标，不产 SVG，适合只想拿到世界坐标的场景。
+- 两条命令都不需要 `SPINE_EXE`。
+
+### 当前没做的（会明确写进 warnings）
+
+- **deform 时间线**：检测到就告警，但**不参与**顶点位移计算，所以变形动画的线框会和渲染有偏差。
+- **IK / transform / path 约束**：不求解，受约束骨骼按原始层级算。工程里有这类约束时 `warnings` 会点名。
+- **inherit 非 normal**（`onlyTranslation` / `noScale` 等）：按 normal 算并告警。
+- **drawOrder**：只影响绘制顺序，不影响几何，直接忽略。
+
+`npm test` **146/146**（新增 `tests/p15-pose.test.mjs` 27 例：时间线采样与三种缓动、偏移语义、世界变换累乘、region 裁剪、附件时间线、不改源 JSON、SVG 结构、自写 PNG 编解码、投影与 IoU）。
 
 
 ## 与 GUI 联动（方案 C）

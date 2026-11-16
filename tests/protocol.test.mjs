@@ -36,7 +36,7 @@ function runServer(messages) {
 
 const byId = (responses, id) => responses.find((r) => r.id === id);
 // 新增工具时只改这里一处；responses.length / rows.length 的 8 是请求数与帧数，别混。
-const EXPECTED_TOOLS = 36;
+const EXPECTED_TOOLS = 38;
 
 test('stdio 双时代协议握手与工具调用', async () => {
   const { responses, stderr, code } = await runServer([

@@ -25,6 +25,10 @@ import { verifyExport } from './verify-export.mjs';
 import { parseSkelFile } from './skel-parse.mjs';
 import { inspectMesh, DETAILS } from './mesh-inspect.mjs';
 import { renderPreview } from './render-preview.mjs';
+import { evaluateScene, listAnimations, atlasFromReport } from './pose-eval.mjs';
+import { sceneToSvg, sceneToHtml } from './wireframe.mjs';
+import { readPng } from './png-read.mjs';
+import { alignCheck } from './align-check.mjs';
 import { assertDirectory, packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
@@ -759,6 +763,53 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'spine_get_wireframe',
+    description: '求解骨架某一时刻的姿态并输出线框：setup pose 或指定动画 + 秒数，回传骨骼世界变换、面片顶点世界坐标、region 可见四边形，可生成 SVG 或自包含 HTML（含骨骼 / 三角面 / region / 顶点 / 名称）。纯本地计算，不调 CLI。用于肉眼核对 diff_animations / merge_animations / edit_animation 改得对不对。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径（必须存在）' },
+        atlasPath: { type: 'string', description: '可选，atlas 文本路径；不给则在 JSON 同目录自动找，仍找不到时 region 按未裁剪的完整帧画（可能撑大包围盒）' },
+        animation: { type: 'string', description: '动画名；不传则用 setup pose' },
+        time: { type: 'number', minimum: 0, description: '采样时间（秒），默认 0' },
+        skin: { type: 'string', description: '皮肤名，默认 default' },
+        format: { type: 'string', enum: ['summary', 'svg', 'html'], description: 'summary 只给统计与坐标；svg 返回线框 SVG；html 返回可直接打开的自包含页面，默认 svg' },
+        showFaces: { type: 'boolean', description: '是否画三角面，默认 true' },
+        showBones: { type: 'boolean', description: '是否画骨骼，默认 true' },
+        showRegions: { type: 'boolean', description: '是否画 region，默认 true' },
+        showPoints: { type: 'boolean', description: '是否画网格顶点，默认 false' },
+        showLabels: { type: 'boolean', description: '是否标骨骼名，默认 false' },
+        strokeScale: { type: 'number', description: '线宽倍率，默认 1；叠加到小图上可调大' },
+        detail: { type: 'boolean', description: 'true 时回传逐骨骼世界变换与面片明细' },
+        outPath: { type: 'string', description: '可选，把 SVG / HTML 写到该文件（扩展名 .svg 或 .html）' },
+        overwrite: { type: 'boolean', description: 'outPath 已存在时是否覆盖，默认 false' },
+      },
+      required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_align_check',
+    description: '把线框按内容包围盒等比贴合到渲染图前景，回传可比较的数字：骨骼沿线命中率、面片重心命中数、三角面覆盖与前景的 IoU、随机基准。用来判断结构数据与渲染画面是否一致，也能区分「姿态算错」和「只是碰巧落在轮廓里」。纯本地计算，不调 CLI。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径（必须存在）' },
+        renderPng: { type: 'string', description: '渲染图 PNG 绝对路径（建议先用 spine_render_preview 出图）' },
+        atlasPath: { type: 'string', description: '可选，atlas 文本路径；不给则自动在 JSON 同目录找' },
+        animation: { type: 'string', description: '动画名；不传则用 setup pose' },
+        time: { type: 'number', minimum: 0, description: '采样时间（秒），默认 0' },
+        skin: { type: 'string', description: '皮肤名，默认 default' },
+        tolerance: { type: 'number', description: '背景色差容差，默认 10；导出用透明背景时按 alpha 判定' },
+        samples: { type: 'integer', minimum: 2, description: '每根骨骼的采样点数，默认 25' },
+        outHtml: { type: 'string', description: '可选，把叠加对照页写到该 .html 文件' },
+        overwrite: { type: 'boolean', description: 'outHtml 已存在时是否覆盖，默认 false' },
+      },
+      required: ['jsonPath', 'renderPng'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function readJson(jsonPath) {
@@ -770,6 +821,42 @@ function readJson(jsonPath) {
       throw new Error(`JSON 解析失败: ${jsonPath} -> ${err.message}`);
     }
   });
+}
+
+// atlas 解析：显式给路径优先，否则在 JSON 同目录按「同名 .atlas.txt / .atlas」再到任意 atlas 文件探测。
+// 找不到也不报错——线框仍能画，只是 region 会按未裁剪的完整帧算，包围盒会偏大。
+async function loadAtlasFile(jsonPath, atlasPath) {
+  const parse = (file, text, auto) => ({
+    path: file,
+    auto,
+    map: atlasFromReport(inspectAtlas(text, { source: file })),
+  });
+  if (atlasPath) {
+    assertSafePath(atlasPath, 'atlasPath', { mustExist: true });
+    return parse(atlasPath, await fs.readFile(atlasPath, 'utf8'), false);
+  }
+  const dir = path.dirname(jsonPath);
+  const stem = path.basename(jsonPath).replace(/\.json$/i, '');
+  const candidates = [path.join(dir, `${stem}.atlas.txt`), path.join(dir, `${stem}.atlas`)];
+  try {
+    const entries = await fs.readdir(dir);
+    for (const name of entries.sort()) {
+      if (/\.atlas(\.txt)?$/i.test(name)) candidates.push(path.join(dir, name));
+    }
+  } catch {
+    // 目录读不到就只试同名候选
+  }
+  const seen = new Set();
+  for (const file of candidates) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    try {
+      return parse(file, await fs.readFile(file, 'utf8'), true);
+    } catch {
+      // 换下一个候选
+    }
+  }
+  return { path: null, auto: false, map: null };
 }
 
 function summarizeSkeleton(skeleton, jsonPath) {
@@ -876,6 +963,118 @@ export async function callTool(name, args = {}) {
         timeoutMs: args.timeoutMs ?? 600000,
         dryRun: args.dryRun === true,
       });
+    }
+
+    case 'spine_get_wireframe': {
+      const skeleton = await readJson(args.jsonPath);
+      const atlas = await loadAtlasFile(args.jsonPath, args.atlasPath);
+      const scene = evaluateScene(skeleton, {
+        animation: args.animation,
+        time: args.time ?? 0,
+        skin: args.skin,
+        atlas: atlas.map,
+      });
+      const format = args.format ?? 'svg';
+      const svgOptions = {
+        showFaces: args.showFaces !== false,
+        showBones: args.showBones !== false,
+        showRegions: args.showRegions !== false,
+        showPoints: args.showPoints === true,
+        showLabels: args.showLabels === true,
+        strokeScale: args.strokeScale ?? 1,
+      };
+
+      const result = {
+        jsonPath: args.jsonPath,
+        atlas: atlas.path ? { path: atlas.path, auto: atlas.auto } : null,
+        pose: scene.pose,
+        animation: scene.animation,
+        time: scene.time,
+        duration: scene.duration,
+        skin: scene.skin,
+        applied: scene.applied,
+        stats: scene.stats,
+        bounds: scene.bounds,
+        warnings: scene.warnings,
+      };
+
+      if (format === 'summary') {
+        result.animations = listAnimations(skeleton);
+        result.nextStep = '要看线框把 format 换成 svg 或 html；要把线框和渲染图对着看，用 spine_render_preview 出图后调用 spine_align_check。';
+        if (args.detail === true) {
+          result.bones = scene.worldBones;
+          result.meshes = scene.meshes.map((m) => ({ skin: m.skin, slot: m.slot, name: m.name, bone: m.bone, weighted: m.weighted, vertices: m.points.length, triangles: Math.floor(m.triangles.length / 3) }));
+          result.regions = scene.regions.map((r) => ({ skin: r.skin, slot: r.slot, name: r.name, trimmed: r.trimmed, corners: r.corners, atlasSize: r.atlasSize }));
+        }
+        return result;
+      }
+
+      const svgResult = sceneToSvg(scene, svgOptions);
+      result.content = svgResult.content;
+      result.frame = svgResult.frame;
+      result.ratio = svgResult.ratio;
+      result.viewBox = svgResult.viewBox;
+
+      const payload = format === 'svg'
+        ? svgResult.svg
+        : sceneToHtml(scene, {
+          ...svgOptions,
+          title: `${path.basename(args.jsonPath).replace(/\.json$/i, '')} · ${scene.pose === 'setup' ? 'setup pose' : `${scene.animation} @ ${scene.time}s`}`,
+        });
+      if (format === 'svg') result.svg = payload;
+      else result.html = payload;
+
+      if (args.outPath) {
+        const target = assertWritableOutput(args.outPath, 'outPath', args.overwrite === true);
+        await fs.writeFile(target, payload, 'utf8');
+        result.outPath = target;
+        result.bytes = Buffer.byteLength(payload, 'utf8');
+      }
+      if (args.detail === true) {
+        result.bones = scene.worldBones;
+        result.meshes = scene.meshes.map((m) => ({ skin: m.skin, slot: m.slot, name: m.name, bone: m.bone, weighted: m.weighted, vertices: m.points.length, triangles: Math.floor(m.triangles.length / 3) }));
+        result.regions = scene.regions.map((r) => ({ skin: r.skin, slot: r.slot, name: r.name, trimmed: r.trimmed, corners: r.corners, atlasSize: r.atlasSize }));
+      }
+      return result;
+    }
+
+    case 'spine_align_check': {
+      assertSafePath(args.renderPng, 'renderPng', { mustExist: true });
+      const skeleton = await readJson(args.jsonPath);
+      const atlas = await loadAtlasFile(args.jsonPath, args.atlasPath);
+      const scene = evaluateScene(skeleton, {
+        animation: args.animation,
+        time: args.time ?? 0,
+        skin: args.skin,
+        atlas: atlas.map,
+      });
+      const png = readPng(await fs.readFile(args.renderPng));
+      const checked = alignCheck({ scene, png, samples: args.samples ?? 25, tolerance: args.tolerance ?? 10 });
+      const result = {
+        jsonPath: args.jsonPath,
+        renderPng: args.renderPng,
+        atlas: atlas.path ? { path: atlas.path, auto: atlas.auto } : null,
+        pose: scene.pose,
+        animation: scene.animation,
+        time: scene.time,
+        stats: scene.stats,
+        ...checked,
+        warnings: scene.warnings,
+      };
+      if (args.outHtml && checked.ok !== false) {
+        const target = assertWritableOutput(args.outHtml, 'outHtml', args.overwrite === true);
+        const html = sceneToHtml(scene, {
+          title: `对齐校验 · ${path.basename(args.jsonPath).replace(/\.json$/i, '')}`,
+          subtitle: `${scene.pose === 'setup' ? 'setup pose' : `${scene.animation} @ ${scene.time}s`} · 骨骼命中 ${checked.boneAverage} · IoU ${checked.maskIou} · ${checked.verdict}`,
+          render: { base64: (await fs.readFile(args.renderPng)).toString('base64'), width: png.width, height: png.height },
+          overlay: checked.overlay,
+          strokeScale: 2.4,
+        });
+        await fs.writeFile(target, html, 'utf8');
+        result.outHtml = target;
+        result.htmlBytes = Buffer.byteLength(html, 'utf8');
+      }
+      return result;
     }
 
     case 'spine_frames_to_seconds': {
