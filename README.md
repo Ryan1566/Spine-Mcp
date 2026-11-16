@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 32 个工具
+## 33 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -89,6 +89,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_edit_slots` | 插槽副本：新增 / 删除（引用保护）/ 改名 / setup 字段 / 排序 | 否 |
 | `spine_edit_skins` | 皮肤副本：新增 / 删除 / 改名 / 按插槽分配附件 | 否 |
 | `spine_inspect_constraints` | 只读检查 IK / transform / path 约束与动画使用 | 否 |
+| `spine_edit_constraints` | 约束副本：新增 / 删除（引用保护）/ 改名（同步动画轨道）/ 改参数 | 否 |
 | `spine_inspect_atlas` | 只读解析 .atlas：页面、region、重叠、越界、缺图 | 否 |
 | `spine_audit_assets` | 审计 skeleton 附件与图集 / 散图的对应关系 | 否 |
 | `spine_export_workflow` | 批量导出工作流：自动生成 json / binary 设置、多组 -i/-e、可选校验、dryRun | 是 |
@@ -152,7 +153,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 - `spine_edit_slots`：`list` 只读；`add` 校验骨骼存在；`set` 只允许 `bone/attachment/color/dark/blend` 白名单字段；`rename` 同步改写皮肤 key、`animations.slots`、`deform` 与 `drawOrder.offsets`；`remove` 默认拒绝任何皮肤附件或动画引用，`dropAttachments` / `dropAnimationTracks` 需显式开启；`reorder` 要求给出全部插槽的新顺序，不得遗漏或重复。
 - `spine_edit_skins`：`list` 只读；`add` 支持数组 / 对象两种 skins 形态并保持原形态；`assign` 按 `{ skin, slot, name, attachment }` 设置附件，`attachment:null` 表示删除；`rename` 同步 `animations.deform` 顶层 key；`remove` 默认拒绝仍被 deform 引用的皮肤，`dropDeformTracks` 显式开启后清理。
-- `spine_inspect_constraints`：只读列出 IK / transform / path 约束、骨骼引用、缺失骨骼与被哪些动画时间轴使用；本工具不修改约束参数。
+- `spine_inspect_constraints`：只读列出 IK / transform / path 约束、骨骼引用、缺失骨骼与被哪些动画时间轴使用；写入请用 P10 的 `spine_edit_constraints`。
 - `spine_inspect_atlas`：解析 3.8 `.atlas` 文本，检查页面图片存在、region 重名 / 越界 / 重叠；`rotate:true` 的 region 按宽高互换后的页面占位做几何校验。
 - `spine_audit_assets`：把 setup 与动画引用的附件和图集 / 散图对上：`mesh.path` 优先于附件名匹配 region；报告图集缺失 region、未被引用的 region 与散图缺文件；不提供 atlas 时跳过图集比对，不提供 imageDir 时跳过散图检查。
 - 官方 `raptor` 实测：`raptor-pma.atlas` 1 页 38 region **0 问题**；39 个附件（含 `mesh.path`）**0 缺失、0 未用 region**；9 个 IK 约束 0 缺失骨骼。`npm test` **68/68**，官方源文件哈希不变。
@@ -195,6 +196,31 @@ node scripts/check-update.mjs      # 等价 npm run check
 - **刻意不开放 `scale`**：实测它按「世界单位 → 像素」解释，`0.5` 会把 1281×1040 的图变成 13×11，与「相对自动适配的倍率」直觉完全不符，交给 CLI 自动适配更安全。
 - **`spine_export_workflow` 不接渲染格式**：它的 `-o` 是目录语义，多个 job 会互相覆盖；渲染导出直接用 `spine_export`。
 - `npm test` **81/81**。
+
+## P10：约束参数修改
+
+`spine_inspect_constraints` 只能看，`spine_edit_constraints` 补上写入（JSON 副本，工具总数 32 → 33）：
+
+| `mode` | 行为 |
+|---|---|
+| `list` | 只读；`type` 可省略（返回三类），包含每条约束被哪些动画轨道引用、各多少帧 |
+| `add` | 必须给 `bones` + `target`；name 在**同类**里唯一（`ik` 和 `transform` 是不同命名空间） |
+| `remove` | 默认拒绝仍有动画引用的约束；`dropAnimationTracks:true` 才连带清轨道 |
+| `rename` | 同步改写 `animations.ik` / `.transform` / `.paths` 的键名，避免留下被运行时忽略的孤儿轨道 |
+| `set` | 只接受白名单字段，空变更给 warning 而不是静默成功 |
+
+字段白名单来自官方 `examples/*/export/*.json` 的字段全集，不是按 4.x 猜的：
+
+- `ik`：`order` / `bones` / `target` / `mix` / `bendPositive`
+- `transform`：上述 + `skin` / `x` / `y` / `rotation` / `scaleX` / `scaleY` / `shearX` / `shearY` / `rotateMix` / `translateMix` / `scaleMix` / `shearMix`
+- `path`：`order` / `bones` / `target` / `positionMode` / `spacingMode` / `rotateMode` / `rotation` / `position` / `spacing` / `rotateMix` / `translateMix`
+
+枚举按实测收窄：`spacingMode` = `length`/`fixed`/`percent`/`proportional`，`rotateMode` = `tangent`/`chain`/`chainScale`（官方样本里出现过 `percent` 与 `chain`/`chainScale`）。
+
+- **官方样本实测**：`raptor` 9 个 IK 改名后，`gun-grab` 里 1 帧的轨道跟着改名、旧名 0 残留；`spineboy` 的 `aim-head-transform` 四路 Mix 与 `rotation` 改值成功；`mix-and-match` 4 条 path 约束改名后顺序不变。
+- 三个改后工程都跑了 `spine_audit_project`：**ok=true，issues 0**。
+- 写操作仍走 `writeJsonCopy`，支持 `dryRun` / `overwrite` / 覆盖前备份；源 JSON 不改。
+- `npm test` **87/87**（新增 `tests/p10-tools.test.mjs` 6 例）。
 
 ## 与 GUI 联动（方案 C）
 
@@ -275,7 +301,7 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 ## 能力边界（如实列出）
 
-- 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、IK 约束创建、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）都可在 JSON 副本上修改（P4 / P4b），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
+- 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）以及**约束参数**（`spine_edit_constraints`）都可在 JSON 副本上修改（P4 / P4b / P10），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正与 P9 的 png / mov / avi / gif 渲染导出均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出与 P10 的约束写入均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。

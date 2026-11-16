@@ -1,4 +1,5 @@
-// P6：插槽、皮肤的受控 JSON 操作与约束只读检查。不调用 CLI、不修改源对象。
+// P6：插槽、皮肤的受控 JSON 操作；约束的只读检查（inspectConstraints）与受控写入（modifyConstraints）。
+// 不调用 CLI、不修改源对象，返回值统一为 { json, summary }。
 const NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const SLOT_FIELDS = ['bone', 'attachment', 'color', 'dark', 'blend'];
@@ -276,4 +277,242 @@ export function inspectConstraints(skeleton) {
     }
   }
   return { counts: Object.fromEntries(['ik', 'transform', 'path'].map((type) => [type, constraints.filter((item) => item.type === type).length])), issueCount: issues.length, issues, constraints };
+}
+
+// 3.8.75 的约束字段白名单，取自官方 examples 里 export/*.json 的字段全集。
+// ik：name/bones/target/order/bendPositive/mix
+// transform：name/bones/target/order/skin/x/y/rotation/scaleX/scaleY/shearX/shearY/四种 Mix
+// path：name/bones/target/order/positionMode/spacingMode/rotateMode/rotation/position/spacing/rotateMix/translateMix
+const CONSTRAINT_SPECS = {
+  ik: {
+    arrayKey: 'ik',
+    animationKey: 'ik',
+    fields: {
+      order: 'order',
+      bones: 'bones',
+      target: 'bone',
+      mix: 'number',
+      bendPositive: 'boolean',
+    },
+  },
+  transform: {
+    arrayKey: 'transform',
+    animationKey: 'transform',
+    fields: {
+      order: 'order',
+      bones: 'bones',
+      target: 'bone',
+      skin: 'string',
+      x: 'number',
+      y: 'number',
+      rotation: 'number',
+      scaleX: 'number',
+      scaleY: 'number',
+      shearX: 'number',
+      shearY: 'number',
+      rotateMix: 'number',
+      translateMix: 'number',
+      scaleMix: 'number',
+      shearMix: 'number',
+    },
+  },
+  path: {
+    arrayKey: 'path',
+    animationKey: 'paths',
+    fields: {
+      order: 'order',
+      bones: 'bones',
+      target: 'bone',
+      positionMode: 'positionMode',
+      spacingMode: 'spacingMode',
+      rotateMode: 'rotateMode',
+      rotation: 'number',
+      position: 'number',
+      spacing: 'number',
+      rotateMix: 'number',
+      translateMix: 'number',
+    },
+  },
+};
+
+const CONSTRAINT_ENUMS = {
+  // 官方样本里出现过 spacingMode=percent、rotateMode=chain/chainScale；其余为 3.8 运行时接受的取值。
+  positionMode: ['fixed', 'percent'],
+  spacingMode: ['length', 'fixed', 'percent', 'proportional'],
+  rotateMode: ['tangent', 'chain', 'chainScale'],
+};
+
+function constraintSpec(type) {
+  const spec = CONSTRAINT_SPECS[type];
+  if (!spec) throw new Error(`未知约束类型: ${type}（可用 ${Object.keys(CONSTRAINT_SPECS).join(' / ')}）`);
+  return spec;
+}
+
+function constraintList(skeleton, type) {
+  const { arrayKey } = constraintSpec(type);
+  skeleton[arrayKey] ??= [];
+  if (!Array.isArray(skeleton[arrayKey])) throw new Error(`源 JSON 的 ${arrayKey} 不是数组`);
+  return skeleton[arrayKey];
+}
+
+function assertConstraintField(field, kind, value, json) {
+  const label = `constraint.${field}`;
+  if (kind === 'number') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${label} 必须是有限数字`);
+    return value;
+  }
+  if (kind === 'order') {
+    if (!Number.isInteger(value) || value < 0) throw new Error(`${label} 必须是非负整数`);
+    return value;
+  }
+  if (kind === 'boolean') {
+    if (typeof value !== 'boolean') throw new Error(`${label} 必须是布尔值`);
+    return value;
+  }
+  if (kind === 'string') {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} 必须是非空字符串`);
+    return value;
+  }
+  if (kind === 'bone') {
+    if (typeof value !== 'string' || !boneNames(json).has(value)) throw new Error(`${label} 指向的骨骼不存在: ${value}`);
+    return value;
+  }
+  if (kind === 'bones') {
+    if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} 必须是非空骨骼名数组`);
+    const names = boneNames(json);
+    for (const bone of value) {
+      if (typeof bone !== 'string' || !names.has(bone)) throw new Error(`${label} 里的骨骼不存在: ${bone}`);
+    }
+    if (new Set(value).size !== value.length) throw new Error(`${label} 不能包含重复骨骼`);
+    return [...value];
+  }
+  if (kind in CONSTRAINT_ENUMS) {
+    if (!CONSTRAINT_ENUMS[kind].includes(value)) {
+      throw new Error(`${label} 只支持 ${CONSTRAINT_ENUMS[kind].join(' / ')}，收到: ${value}`);
+    }
+    return value;
+  }
+  throw new Error(`内部错误：未知字段类型 ${kind}`);
+}
+
+function pickConstraintFields(type, input, json) {
+  const { fields } = constraintSpec(type);
+  const result = {};
+  for (const [field, value] of Object.entries(input ?? {})) {
+    if (field === 'name') continue;
+    const kind = fields[field];
+    if (!kind) throw new Error(`约束类型 ${type} 不支持字段 ${field}（可用 ${['name', ...Object.keys(fields)].join(' / ')}）`);
+    if (value === undefined) continue;
+    result[field] = assertConstraintField(field, kind, value, json);
+  }
+  return result;
+}
+
+// path 约束的 target 骨骼上通常挂着 type=path 的附件；找不到只提示，不阻断（附件也可能来自运行时）。
+function pathTargetHint(json, target) {
+  const slots = new Set((json.slots ?? []).filter((slot) => slot?.bone === target).map((slot) => slot.name));
+  if (slots.size === 0) return `目标骨骼 ${target} 上没有插槽，path 约束通常需要骨骼上挂一个 path 附件`;
+  for (const [, skinSlots] of skinEntries(json)) {
+    for (const slotName of slots) {
+      for (const attachment of Object.values(skinSlots?.[slotName] ?? {})) {
+        if (attachment?.type === 'path') return null;
+      }
+    }
+  }
+  return `目标骨骼 ${target} 的插槽上没找到 type=path 的附件，请确认路径附件放在该骨骼的插槽上`;
+}
+
+function constraintAnimationRefs(json, type, name) {
+  const { animationKey } = constraintSpec(type);
+  const hits = [];
+  for (const [animationName, animation] of Object.entries(json.animations ?? {})) {
+    if (animation?.[animationKey]?.[name]) hits.push({ animation: animationName, keyframes: animation[animationKey][name].length ?? 0 });
+  }
+  return hits;
+}
+
+export function modifyConstraints(skeleton, options = {}) {
+  const { mode = 'list', type, name, newName, constraint, dropAnimationTracks = false } = options;
+
+  if (mode === 'list') {
+    const types = type ? [type] : Object.keys(CONSTRAINT_SPECS);
+    const constraints = [];
+    for (const item of types) {
+      const spec = constraintSpec(item);
+      for (const [index, entry] of (skeleton?.[spec.arrayKey] ?? []).entries()) {
+        constraints.push({
+          type: item,
+          index,
+          definition: structuredClone(entry),
+          animations: constraintAnimationRefs(skeleton, item, entry?.name),
+        });
+      }
+    }
+    return { constraints, counts: Object.fromEntries(Object.keys(CONSTRAINT_SPECS).map((key) => [key, constraints.filter((item) => item.type === key).length])) };
+  }
+
+  if (!type) throw new Error('写操作必须指定 type（ik / transform / path）');
+  const spec = constraintSpec(type);
+  const json = structuredClone(skeleton);
+  const list = constraintList(json, type);
+  const names = new Set(list.map((entry) => entry?.name));
+  const summary = { mode, type, added: [], removed: [], renamed: [], updated: [], droppedAnimationTracks: [], warnings: [] };
+
+  if (mode === 'add') {
+    assertName(constraint?.name, 'constraint.name');
+    if (names.has(constraint.name)) throw new Error(`${type} 约束已存在: ${constraint.name}`);
+    if (constraint.bones === undefined || constraint.target === undefined) {
+      throw new Error('新增约束必须提供 bones 与 target');
+    }
+    const entry = { name: constraint.name, ...pickConstraintFields(type, constraint, json) };
+    list.push(entry);
+    summary.added.push({ name: entry.name, bones: entry.bones, target: entry.target });
+    if (type === 'path') {
+      const hint = pathTargetHint(json, entry.target);
+      if (hint) summary.warnings.push(hint);
+    }
+  } else if (mode === 'remove') {
+    if (!names.has(name)) throw new Error(`${type} 约束不存在: ${name}`);
+    const refs = constraintAnimationRefs(json, type, name);
+    if (refs.length && !dropAnimationTracks) {
+      throw new Error(`约束 ${name} 仍有动画引用: ${refs.map((item) => `${item.animation}(${item.keyframes} 帧)`).join(', ')}；如确认清理请传 dropAnimationTracks:true`);
+    }
+    for (const ref of refs) delete json.animations?.[ref.animation]?.[spec.animationKey]?.[name];
+    const index = list.findIndex((entry) => entry?.name === name);
+    list.splice(index, 1);
+    names.delete(name);
+    summary.removed.push({ name, index });
+    summary.droppedAnimationTracks.push(...refs);
+  } else if (mode === 'rename') {
+    if (!names.has(name)) throw new Error(`${type} 约束不存在: ${name}`);
+    assertName(newName, 'newName');
+    if (names.has(newName)) throw new Error(`${type} 约束名已存在: ${newName}`);
+    list.find((entry) => entry?.name === name).name = newName;
+    // 动画轨道以约束名为键，改名必须同步，否则轨道会变成孤儿并被运行时忽略。
+    for (const animation of Object.values(json.animations ?? {})) {
+      const tracks = animation?.[spec.animationKey];
+      if (tracks?.[name]) {
+        tracks[newName] = tracks[name];
+        delete tracks[name];
+      }
+    }
+    summary.renamed.push({ from: name, to: newName });
+  } else if (mode === 'set') {
+    if (!names.has(name)) throw new Error(`${type} 约束不存在: ${name}`);
+    const changes = pickConstraintFields(type, constraint, json);
+    if (!Object.keys(changes).length) {
+      summary.warnings.push(`约束 ${name} 没有可修改字段`);
+    } else {
+      Object.assign(list.find((entry) => entry?.name === name), changes);
+      summary.updated.push({ name, fields: Object.keys(changes) });
+      if (type === 'path' && changes.target !== undefined) {
+        const hint = pathTargetHint(json, changes.target);
+        if (hint) summary.warnings.push(hint);
+      }
+    }
+  } else {
+    throw new Error(`未知 mode: ${mode}（可用 list / add / remove / rename / set）`);
+  }
+
+  return { json, summary };
 }

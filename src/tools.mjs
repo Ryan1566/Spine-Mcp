@@ -29,7 +29,7 @@ import { modifyBones } from './bone-ops.mjs';
 import { editWeights } from './weight-ops.mjs';
 import { auditProject } from './project-audit.mjs';
 import { inspectAnimation, editAnimation } from './animation-detail.mjs';
-import { modifySlots, modifySkins, inspectConstraints } from './structure-ops.mjs';
+import { modifySlots, modifySkins, inspectConstraints, modifyConstraints } from './structure-ops.mjs';
 import { inspectAtlas, auditAssets } from './asset-audit.mjs';
 import { writeJsonCopy } from './write-safety.mjs';
 import { runExportWorkflow } from './export-workflow.mjs';
@@ -601,6 +601,28 @@ export const TOOLS = [
     },
   },
   {
+    name: 'spine_edit_constraints',
+    description: '在 JSON 副本上受控修改 IK / transform / path 约束：list / add / remove / rename / set。改名会同步动画轨道键名，删除前检查动画引用，字段按 3.8.75 官方白名单校验。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceJsonPath: { type: 'string', description: '源 skeleton JSON 绝对路径（只读）' },
+        outputJsonPath: { type: 'string', description: '输出 JSON 绝对路径（非 list 模式必填）' },
+        mode: { type: 'string', enum: ['list', 'add', 'remove', 'rename', 'set'], description: '默认 list（只读）' },
+        type: { type: 'string', enum: ['ik', 'transform', 'path'], description: 'list 可省略（返回三类），写操作必填' },
+        name: { type: 'string', description: 'remove / rename / set 的目标约束名' },
+        newName: { type: 'string', description: 'rename 的新约束名' },
+        constraint: { type: 'object', description: 'add / set 的字段：ik 支持 order/bones/target/mix/bendPositive；transform 另有 skin/x/y/rotation/scaleX/scaleY/shearX/shearY/rotateMix/translateMix/scaleMix/shearMix；path 另有 positionMode/spacingMode/rotateMode/rotation/position/spacing/rotateMix/translateMix', additionalProperties: true },
+        dropAnimationTracks: { type: 'boolean', description: 'remove 时清掉引用该约束的动画轨道，默认 false（存在引用即拒绝删除）' },
+        overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
+        dryRun: { type: 'boolean', description: '只返回变更摘要与将要写入的内容，不落盘' },
+        backup: { type: 'boolean', description: '覆盖旧输出前备份，默认 true' },
+      },
+      required: ['sourceJsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'spine_inspect_atlas',
     description: '只读解析 .atlas 文件：页面、region 矩形、重名、越界、重叠与页图片存在性。不解码图片、不写文件。',
     inputSchema: {
@@ -1099,6 +1121,35 @@ export async function callTool(name, args = {}) {
     case 'spine_inspect_constraints': {
       const skeleton = await readJson(args.jsonPath);
       return { jsonPath: args.jsonPath, ...inspectConstraints(skeleton) };
+    }
+
+    case 'spine_edit_constraints': {
+      const skeleton = await readJson(args.sourceJsonPath);
+      const mode = args.mode ?? 'list';
+      const result = modifyConstraints(skeleton, {
+        mode,
+        type: args.type,
+        name: args.name,
+        newName: args.newName,
+        constraint: args.constraint,
+        dropAnimationTracks: args.dropAnimationTracks === true,
+      });
+      if (mode === 'list') return { sourceJsonPath: args.sourceJsonPath, ...result };
+      if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
+      const written = await writeJsonCopy({
+        sourceSkeleton: skeleton,
+        outputJsonPath: args.outputJsonPath,
+        json: result.json,
+        overwrite: args.overwrite === true,
+        dryRun: args.dryRun === true,
+        backup: args.backup !== false,
+      });
+      return {
+        ...written,
+        ...(written.dryRun ? {} : { nextStep: NEXT_STEP_IMPORT }),
+        ...result.summary,
+        constraintNames: (result.json[args.type] ?? []).map((entry) => entry?.name),
+      };
     }
 
     case 'spine_inspect_atlas': {
