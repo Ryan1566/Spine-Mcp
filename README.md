@@ -57,12 +57,13 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 33 个工具
+## 34 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
 | `spine_doctor` | 检查 Node / SPINE_EXE / 协议版本；`probe=true` 时跑 `--help` | 可选 |
 | `spine_inspect_json` | 只读解析导出的 skeleton JSON，列出骨骼/插槽/皮肤/动画/事件 | 否 |
+| `spine_inspect_skel` | 只读解析二进制 `.skel`：逐字段读到文件末尾，回传结构计数、动画时长与引用完整性检查 | 否 |
 | `spine_frames_to_seconds` | 帧规格 → Spine 秒表，标出命中帧 | 否 |
 | `spine_build_combat_animation` | 在 JSON **副本**上写骨骼关键帧、插槽换图、事件帧 | 否 |
 | `spine_validate_timeline` | 静态校验时间轴递增、骨骼存在、事件定义齐全 | 否 |
@@ -73,7 +74,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_project_info` | 只读工程信息（`-i` Info），返回原始输出 + 结构化摘要 | 是 |
 | `spine_version` | 启动器版本信息（`--version`），只读 | 是 |
 | `spine_make_export_settings` | 生成导出设置 JSON：数据导出 `json` / `binary`，渲染导出 `png` / `mov` / `avi` / `gif`，均已实测 | 否 |
-| `spine_verify_export` | 只读比对源工程与导出目录产物的骨骼 / 插槽 / 动画列表 | 是 |
+| `spine_verify_export` | 只读比对源工程与导出目录产物（`.json` 走 CLI、`.skel` 走本地解析）的骨骼 / 插槽 / 动画 / IK 列表 | 是 |
 | `spine_pack_atlas` | 图集打包（`-i/-o/-p`，可选 `-j`/`-n`），支持图集名或 pack.json | 是 |
 | `spine_unpack_atlas` | 图集解包（`-i/-o/-c`），把 atlas 页还原成散图 | 是 |
 | `spine_restore_backup` | 把写前备份恢复回 `.spine` 工程，需 `overwrite:true`，恢复前再备份当前目标 | 否 |
@@ -278,6 +279,33 @@ node scripts/check-update.mjs      # 等价 npm run check
 - **官方实测**：raptor 工程 `json + binary + pack`，20 秒完成；数据产物 2 个主产物 + 2 个附带产物（1.82 MB），打包产出 `raptor.atlas`（3.9 KB）与 `raptor.png`（479 KB），源 `.spine` 不变。
 - `npm test` **98/98**（新增 `tests/p12-pack.test.mjs` 5 例）。
 
+## P13：.skel 二进制结构级校验
+
+数据导出的 `.skel` 是二进制，官方 `-i` Info 读不了，此前只能确认「文件存在」和「文件头正确」。P13 补上真正的结构级解析：新增 `src/skel-parse.mjs`（零依赖）与 `spine_inspect_skel`，并让 `spine_verify_export` 同时覆盖二进制产物。
+
+读取顺序严格按官方 `SkeletonBinary`（3.8 分支，Java 与 TS 两端逐字段核对）：
+
+```
+header → 字符串表 → bones → slots → ik → transform → path
+       → 默认皮肤 → 其它皮肤 → events → animations
+```
+
+**核心判据是「读到文件末尾恰好耗尽字节」**——`consumedBytes === bytes` 才说明整棵树在字节层面自洽；一旦某个字段读法有偏差，后续必然错位，几乎不可能刚好落在 EOF 上。因此 `trailingBytes > 0` 直接判为 error。
+
+- **格式要点（踩过的坑）**
+  - `readString`：变长整数存「字节数 + 1」，0 表示 `null`，1 表示空串；`readStringRef` 是字符串表下标，0 表示 `null`。
+  - `readInt(optimizePositive)` 是 7 位变长；`optimizePositive=false` 时按 ZigZag 解码（事件 `intValue` 用这种）。
+  - `float` / `int32` / `short` 全部**大端**。
+  - **附件名要读两次**：`readSkin` 先读一次，`readAttachment` 内部再读一次，后者为 0 时**回退到前者**（不是再读一个字符串）。这一点 TS 版转述容易写成 `readString()`，按 Java 原实现才对。
+  - `varint` 长度前缀里，**时间线帧的曲线**只在 `frameIndex < frameCount - 1` 时读；`byte=2`(BEZIER) 追加 4 个 float，`0`(LINEAR) / `1`(STEPPED) 不追加。
+  - 事件时间线是否读 `volume`/`balance`，取决于 **events 段**里该事件有没有 `audioPath`，不是每帧一个标志位。
+- **`spine_inspect_skel`**：`detail=false` 只回 `counts`、每个动画的 `duration` / 时间线条数与 `issues`；`detail=true` 额外给完整骨骼 / 插槽 / 约束明细。不调用 CLI，纯本地解析。
+- **引用完整性检查**：骨骼父级必须指向更早的骨骼；插槽骨骼、IK / transform / path 的 `bones` 与 `target`、皮肤引用的骨骼与约束、动画里各时间线的索引、Deform 时间线引用的附件，全部做越界校验，问题进 `issues` 而不是抛异常。
+- **`spine_verify_export` 升级**：`.json` 仍走官方 `-i`（与源工程同口径），`.skel` 走本地解析；二进制文件内没有 skeleton 名字，按文件名推导，对不上时若源工程只有一个 skeleton 就认它（`matchedBy: "sole-skeleton"`）；`includeBinary=false` 可关掉。产物结构自检失败会进 `binaryProblems` 并拉低整体 `ok`。
+- **`-i` Info 解析补齐 `IK constraints`**：否则二进制侧有 IK 名字、源工程侧为空，会产生假差异。
+- **官方实测**：raptor / spineboy / mix-and-match / stretchyman / tank / alien / vine / owl 共 8 个工程导出二进制后全部 `trailingBytes=0`、`errorCount=0`；骨骼 / 插槽 / IK / transform / path / 皮肤 / 附件 / 事件 / 动画计数与对应 JSON 全部一致（`mix-and-match` 34 皮肤 373 附件、`tank` 200 插槽、`spineboy` 80 附件均对上）。`raptor` 的 JSON + Binary 同目录混合校验 `ok=true`，把 `.skel` 截掉 40 字节后 `ok=false` 并指出越界偏移。
+- `npm test` **108/108**（新增 `tests/p13-skel.test.mjs` 10 例，内含一个精简 `.skel` 编码器，用手工构造的「已知答案」字节流验证解析，不依赖 CLI）。
+
 ## 与 GUI 联动（方案 C）
 
 CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不监听磁盘变化，所以 CLI 写完 `.spine` 后窗口里还是旧内容。官方 CLI 没有 reload / watch 参数，`prefs.json` 没有自动重载开关，`hotkeys.txt` 里只有 `Ctrl+O` 打开工程、`Ctrl+S` 保存。
@@ -359,5 +387,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）以及**约束参数**（`spine_edit_constraints`）都可在 JSON 副本上修改（P4 / P4b / P10），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告与 P12 的图集打包串联均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告、P12 的图集打包串联与 P13 的 `.skel` 二进制结构级解析均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：渲染导出的画面内容比对（只看容器与文件头）。产物二进制已进 P13，`.skel` 的字节级结构（含引用完整性）现在会真解析到文件末尾并逐项校验。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。

@@ -22,6 +22,7 @@ import { makeExportSettings, readExportClass, isRenderClass, formatForRenderClas
 import { collectRenderOutputs } from './render-outputs.mjs';
 import { backupIfExists, listBackups } from './backup.mjs';
 import { verifyExport } from './verify-export.mjs';
+import { parseSkelFile } from './skel-parse.mjs';
 import { assertDirectory, packArgs, unpackArgs } from './atlas.mjs';
 import { restoreBackup } from './restore.mjs';
 import { diffAnimations, mergeAnimations, manageEvents, buildBatch } from './animation-ops.mjs';
@@ -92,6 +93,19 @@ export const TOOLS = [
       type: 'object',
       properties: { jsonPath: { type: 'string', description: 'skeleton JSON 绝对路径' } },
       required: ['jsonPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_inspect_skel',
+    description: '只读解析 Spine 二进制 .skel：按 SkeletonBinary 顺序逐字段读到文件末尾，回传头部信息、骨骼/插槽/约束/皮肤/附件/事件/动画结构，并做引用完整性检查。consumedBytes 必须等于文件长度，否则说明结构读分叉。不调用 CLI，不修改文件。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skelPath: { type: 'string', description: '.skel 二进制文件绝对路径（必须存在）' },
+        detail: { type: 'boolean', description: '为 true 时额外回传完整骨骼 / 插槽 / 约束明细，默认只给计数与动画时长' },
+      },
+      required: ['skelPath'],
       additionalProperties: false,
     },
   },
@@ -270,12 +284,13 @@ export const TOOLS = [
   },
   {
     name: 'spine_verify_export',
-    description: '只读校验导出产物：用官方 -i Info 分别读取源工程与导出目录里的 .json 产物，比对每个 skeleton 的骨骼 / 插槽 / 动画列表。会多次启动 CLI，较慢。',
+    description: '只读校验导出产物：源工程用官方 -i Info 读取；产物中 .json 同样走 -i Info，.skel 走本地二进制解析（不依赖 CLI）。比对每个 skeleton 的骨骼 / 插槽 / 动画 / IK 名称集合，并回传二进制结构自检结果。会多次启动 CLI，较慢。',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: '源 .spine 工程绝对路径（必须存在）' },
         exportDir: { type: 'string', description: '导出目录绝对路径（必须存在）' },
+        includeBinary: { type: 'boolean', description: '是否同时解析 .skel 产物，默认 true' },
       },
       required: ['projectPath', 'exportDir'],
       additionalProperties: false,
@@ -780,6 +795,27 @@ export async function callTool(name, args = {}) {
       return summarizeSkeleton(skeleton, args.jsonPath);
     }
 
+    case 'spine_inspect_skel': {
+      const parsed = await parseSkelFile(args.skelPath);
+      if (args.detail === true) return parsed;
+      return {
+        file: parsed.file,
+        ok: parsed.ok,
+        bytes: parsed.bytes,
+        consumedBytes: parsed.consumedBytes,
+        trailingBytes: parsed.trailingBytes,
+        header: parsed.header,
+        stringCount: parsed.stringCount,
+        counts: parsed.counts,
+        skins: parsed.skins,
+        events: parsed.events,
+        animations: parsed.animations,
+        issues: parsed.issues,
+        errorCount: parsed.errorCount,
+        warningCount: parsed.warningCount,
+      };
+    }
+
     case 'spine_frames_to_seconds': {
       return frameTable(args.frames, args.fps, args.eventFrames ?? []);
     }
@@ -890,7 +926,7 @@ export async function callTool(name, args = {}) {
     }
 
     case 'spine_verify_export': {
-      return verifyExport({ projectPath: args.projectPath, exportDir: args.exportDir });
+      return verifyExport({ projectPath: args.projectPath, exportDir: args.exportDir, includeBinary: args.includeBinary !== false });
     }
 
     case 'spine_pack_atlas': {

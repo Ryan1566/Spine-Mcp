@@ -20,7 +20,7 @@ export function parseProjectInfo(stdout) {
     if ((m = /^Spine version:\s*(.+)$/.exec(line))) { parsed.spineVersion = m[1]; continue; }
     if ((m = /^Dopesheet FPS:\s*(\d+)$/.exec(line))) { parsed.dopesheetFps = Number(m[1]); continue; }
     if ((m = /^Skeleton:\s*(.+)$/.exec(line))) {
-      current = { name: m[1], size: null, bones: [], slots: [], animations: [] };
+      current = { name: m[1], size: null, bones: [], slots: [], ik: [], animations: [] };
       parsed.skeletons.push(current);
       continue;
     }
@@ -28,6 +28,7 @@ export function parseProjectInfo(stdout) {
     if ((m = /^Size:\s*(.+)$/.exec(line))) { current.size = m[1]; continue; }
     if ((m = /^Bones \(\d+\):\s*(.+)$/.exec(line))) { current.bones = splitNames(m[1]); continue; }
     if ((m = /^Slots \(\d+\):\s*(.+)$/.exec(line))) { current.slots = splitNames(m[1]); continue; }
+    if ((m = /^IK constraints \(\d+\):\s*(.+)$/.exec(line))) { current.ik = splitNames(m[1]); continue; }
     if ((m = /^Animations \(\d+\):\s*(.+)$/.exec(line))) { current.animations = splitNames(m[1]); continue; }
   }
   return parsed;
