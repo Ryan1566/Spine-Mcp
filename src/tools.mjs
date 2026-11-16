@@ -678,6 +678,19 @@ export const TOOLS = [
         prettyPrint: { type: 'boolean', description: '生成 JSON 设置时是否 prettyPrint，默认 true' },
         nonessential: { type: 'boolean', description: '生成设置时是否包含 nonessential，默认 true' },
         verify: { type: 'boolean', description: '导出成功后是否用官方 -i Info 校验产物，默认 false' },
+        pack: {
+          type: 'object',
+          description: '可选，数据导出成功后打包图集（-i 图片目录 -j 工程 -o 输出 -p 设置或图集名），一次拿到 json/skel + atlas + png',
+          properties: {
+            imageDir: { type: 'string', description: '散图目录绝对路径（必填，必须存在）' },
+            name: { type: 'string', description: '图集名；未提供 settingsPath 时必填' },
+            settingsPath: { type: 'string', description: '可选，图集打包设置 JSON（官方 atlas-*.json）' },
+            projectPaths: { type: 'array', description: '可选，多个 -j 工程路径，用于判断哪些图片被用到', items: { type: 'string' } },
+            outputDir: { type: 'string', description: '可选，图集输出目录；默认沿用 outputDir，多工程时必填' },
+          },
+          required: ['imageDir'],
+          additionalProperties: false,
+        },
         dryRun: { type: 'boolean', description: 'true 时只返回计划，不建目录、不写设置、不调用 CLI' },
       },
       required: ['outputDir'],
@@ -1187,6 +1200,7 @@ export async function callTool(name, args = {}) {
         prettyPrint: args.prettyPrint,
         nonessential: args.nonessential,
         verify: args.verify === true,
+        pack: args.pack,
         dryRun: args.dryRun === true,
       });
     }

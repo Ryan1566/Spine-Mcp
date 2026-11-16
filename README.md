@@ -92,7 +92,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_edit_constraints` | 约束副本：新增 / 删除（引用保护）/ 改名（同步动画轨道）/ 改参数 | 否 |
 | `spine_inspect_atlas` | 只读解析 .atlas：页面、region、重叠、越界、缺图 | 否 |
 | `spine_audit_assets` | 审计 skeleton 附件与图集 / 散图的对应关系 | 否 |
-| `spine_export_workflow` | 批量导出工作流：多工程 × 多格式矩阵、自动生成设置、统一产物报告、可选校验、dryRun | 是 |
+| `spine_export_workflow` | 批量导出工作流：多工程 × 多格式矩阵、自动生成设置、可选图集打包、统一产物报告、可选校验、dryRun | 是 |
 | `spine_list_backups` | 只读列出写前备份清单（临时目录 spine-mcp-backups） | 否 |
 
 ## 写操作与人工重载（P0）
@@ -160,7 +160,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 ## P7：导出工作流与写操作安全
 
-- **`spine_export_workflow`**：一次调用完成「生成导出设置 → 批量导出 → 可选产物校验」。未提供设置时自动生成到**系统临时目录**，导出结束默认删除；`dryRun:true` 只返回计划，不建目录、不写设置、不调用 CLI。工作流**不开启 `cleanUp`**，不改动源工程。工作流只做 `json` / `binary`：它的 `-o` 是目录语义，而渲染导出的 `-o` 是文件基名，批量跑会互相覆盖，所以 `png` / `mov` / `avi` / `gif` 请直接调 `spine_export`（见 P9）。多工程矩阵与统一产物报告见 P11。
+- **`spine_export_workflow`**：一次调用完成「生成导出设置 → 批量导出 → 可选产物校验」。未提供设置时自动生成到**系统临时目录**，导出结束默认删除；`dryRun:true` 只返回计划，不建目录、不写设置、不调用 CLI。工作流**不开启 `cleanUp`**，不改动源工程。工作流只做 `json` / `binary`：它的 `-o` 是目录语义，而渲染导出的 `-o` 是文件基名，批量跑会互相覆盖，所以 `png` / `mov` / `avi` / `gif` 请直接调 `spine_export`（见 P9）。多工程矩阵与统一产物报告见 P11，图集打包串联见 P12。
 - **binary 扩展名修正**：实测 3.8.75 的 `export-binary` 按 `extension` 决定产物名；此前设置里沿用 `.json`，产物内容是二进制但文件名误导。现已改为 **`.skel`**，并重新用官方 raptor 端到端验证。
 - **官方 raptor 实测**：同一工程走一次工作流导出 JSON + Binary（2 个 job），产物 `raptor-pro.json`、`raptor-pro.skel`、atlas 与 png 齐全；`verify:true` 对 `.json` / `.skel` 分别跑官方 `-i` Info，**骨骼 74 / 插槽 36 / 动画 5 全部匹配，ok=true**；源 `.spine` 哈希不变。
 - **写操作安全层**（`src/write-safety.mjs`）：所有 JSON 副本写操作统一走 `dryRun` 预览、顶层变更摘要（`changedSections` + 动画名级 added/removed/changed）、同目录临时文件 + rename 的**原子写入**；`overwrite:true` 覆盖旧输出前默认再备份一次并返回 `backupPath`。
@@ -246,6 +246,38 @@ node scripts/check-update.mjs      # 等价 npm run check
 - `exportSettingsPath` 仍然只能用于单 job，多 job 场景请放进 `extraInputs[].exportSettingsPath`，否则无法判断该给哪个工程用。
 - `npm test` **93/93**（新增 `tests/p11-workflow.test.mjs` 6 例）。
 
+## P12：图集打包串联
+
+`spine_export_workflow` 支持可选的 `pack` 步骤，一次调用拿到完整运行时包（数据 + 图集 + 页图片）：
+
+```json
+{
+  "projectPath": "D:/proj/raptor-pro.spine",
+  "outputDir": "D:/out/runtime",
+  "formats": ["json", "binary"],
+  "verify": true,
+  "pack": {
+    "imageDir": "D:/proj/images",
+    "settingsPath": "D:/Spine/examples/export/atlas-0.5.json",
+    "name": "raptor",
+    "projectPaths": ["D:/proj/raptor-pro.spine"]
+  }
+}
+```
+
+- 参数映射到官方 `-i <图片目录> [-j 工程]... -o <目录> -n <图集名> -p <设置|图集名>`；不给 `settingsPath` 时 `name` 必填，直接当图集名用。
+- **打包是收尾步骤**：数据导出失败就不打包，避免把时间浪费在注定不完整的产物上。
+- **打包目录**默认与 `outputDir` 相同；**多工程时必须显式给 `pack.outputDir`**，否则两个工程的图片目录会被混进同一个图集。
+- **报告口径**：`report.pack` 只统计本次打包新增的 `.atlas` / `.atlas.txt` / `.png`，并排除已被数据 job 归属的同目录文件（否则导出自带的 `.atlas.txt`、`.png` 会被重复计数）。
+- **失败原因不再丢失**：3.8.75 打包失败常以非零退出码 + stderr 表现，`error` 会给出 `Caused by: ...` 那一行，而不是 `null`。实测踩到的例子：
+  ```
+  Image does not fit within max page size 1024x1024 and edge padding 2*2,2*2: raptor-body[1264,465]
+  ```
+  官方脚本给 raptor 用的是 `atlas-0.5.json`（缩放 0.5），用 `atlas-1.0.json` 的 1024 页装不下 1264 宽的图。
+- **打包失败不连累数据导出**：两者的成败分开记录——`success` 为整体结果，`runs[]` 与 `packResult` 各自带 `success` / `error`；`verify` 只看数据导出是否成功，打包失败时校验结果照常返回。
+- **官方实测**：raptor 工程 `json + binary + pack`，20 秒完成；数据产物 2 个主产物 + 2 个附带产物（1.82 MB），打包产出 `raptor.atlas`（3.9 KB）与 `raptor.png`（479 KB），源 `.spine` 不变。
+- `npm test` **98/98**（新增 `tests/p12-pack.test.mjs` 5 例）。
+
 ## 与 GUI 联动（方案 C）
 
 CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不监听磁盘变化，所以 CLI 写完 `.spine` 后窗口里还是旧内容。官方 CLI 没有 reload / watch 参数，`prefs.json` 没有自动重载开关，`hotkeys.txt` 里只有 `Ctrl+O` 打开工程、`Ctrl+S` 保存。
@@ -327,5 +359,5 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 
 - 不替代 Spine 编辑器、不绕过商业授权；不做鼠标键盘模拟、窗口自动化、时间轴拖动、mesh 封套编辑、编辑器里刷权重、预览渲染。骨骼**结构与 setup pose 数值**（`spine_modify_bones`）、**网格权重数值**（`spine_edit_weights` 的 inspect / normalize / scale）以及**约束参数**（`spine_edit_constraints`）都可在 JSON 副本上修改（P4 / P4b / P10），但编辑器里的交互式骨骼 / 权重操作仍不支持。GUI 联动只通过 `spine_reload_gui` 调用官方 Editor 模式请求重新打开工程。
 - `.spine` 的一切改动只经官方 CLI；动画生成只写 skeleton JSON 副本，**不直接改 .spine 二进制**。
-- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入与 P11 的导出矩阵 / 统一产物报告均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
+- CLI 参数构造依据 1425sd/spine-MCP 项目记录的 3.8.75 用法；本机已端到端验证 `--help`、`-i` 只读 Info、`spine_export`（`json` / `binary` 副本真实导出，exitCode 0）、`spine_import_json`、`spine_clean`，以及「导出 → `spine_inspect_json` → `spine_build_combat_animation` → `spine_validate_timeline`」全链路；多 `-i/-e` 批量导出（混合 JSON / Binary）、图集 pack / unpack、以及 `-r` 导入另一个工程的 skeleton 均已实测；P3 的 diff / 合并 / 事件管理 / 批量生成、P4 的骨骼修改、P4b 的权重数值、P5 的体检 / 动画明细 / 动画编辑、P6 的插槽 / 皮肤 / 约束检查 / 图集资源审计、P7 的导出工作流 / 写操作安全层、P8 的全类型时间轴体检 / 工作流报告修正、P9 的 png / mov / avi / gif 渲染导出、P10 的约束写入、P11 的导出矩阵 / 统一产物报告与 P12 的图集打包串联均由离线单测覆盖，并额外通过真实 MCP stdio 会话跑通全部新工具（渲染导出实测产出 8 张 png、`.mov`、`.avi`、`.gif` 且文件头正确）；**未验证**：产物二进制内容级比对、渲染导出的画面内容比对（只看容器与文件头）。协议层与纯逻辑层已跑通自动化测试。
 - 无图集拆分 / 自动绑骨 / 预览渲染 / Cocos 扩展，这些是后续可扩展项，不是本版能力。
