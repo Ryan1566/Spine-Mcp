@@ -17,6 +17,7 @@ import {
   validateAnimation,
 } from './timeline.mjs';
 import { requestGuiReload, RELOAD_HINT } from './gui-link.mjs';
+import { inspectGuiProject } from './gui-status.mjs';
 import { projectInfo } from './project-info.mjs';
 import { makeExportSettings, readExportClass, isRenderClass, formatForRenderClass } from './export-settings.mjs';
 import { collectRenderOutputs } from './render-outputs.mjs';
@@ -276,6 +277,17 @@ export const TOOLS = [
         backup: { type: 'boolean', description: '写前把源工程备份到系统临时目录，默认 true（实测 -m 会原地改写文件）' },
       },
       required: ['inputPath'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spine_gui_status',
+    description: '查询 Spine GUI 当前打开的是哪个工程。判据是进程窗口标题（Spine - <工程名>），不是文件 mtime——打开工程不落盘，mtime 完全不可靠，踩过坑。任何写操作之前都应先调用它确认目标，避免改错文件；可传 projectPath 直接核对，不匹配会在 warnings 里告警。标题带 * 时会提示可能有未保存改动。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: '可选：要核对的工程路径；返回 matchesCurrent 判断它是否就是当前打开的工程（只比文件名，同名不同目录区分不了）' },
+      },
       additionalProperties: false,
     },
   },
@@ -1197,6 +1209,10 @@ export async function callTool(name, args = {}) {
     }
 
     case 'spine_import_json': {
+      // 任何写盘操作之前先确认 GUI 当前打开的是哪个工程：
+      // 判据是窗口标题，不是文件 mtime（打开工程不写盘，mtime 会骗人）。
+      const gui = inspectGuiProject({ projectPath: args.outputPath });
+      const attachGui = (r) => ({ ...r, gui });
       const replaceProject = args.replaceProject === true;
       // replaceProject：CLI 只认「导入到已有工程 → 追加骨架」，不能替换同名骨架。
       // 所以先把结果生成到同目录临时文件，成功后再整体换掉目标，等价于「原地重生」。
@@ -1223,10 +1239,10 @@ export async function callTool(name, args = {}) {
       if (!replaceProject) assertWritableOutput(args.outputPath, 'outputPath', args.overwrite === true);
       const backupPath = backupIfExists(args.outputPath, args.overwrite === true && args.backup !== false);
       const result = await runSpine(cliArgs);
-      if (!replaceProject) return withBackup(withReloadHint(result), backupPath);
+      if (!replaceProject) return withBackup(withReloadHint(attachGui(result)), backupPath);
       if (result.success === false) {
         await fs.rm(staging, { force: true });
-        return withBackup({ ...result, replaceProject: true, replaced: false, note: 'CLI 导入失败，目标工程未改动；临时文件已清理。' }, backupPath);
+        return withBackup({ ...result, replaceProject: true, replaced: false, gui, note: 'CLI 导入失败，目标工程未改动；临时文件已清理。' }, backupPath);
       }
       await fs.rm(args.outputPath, { force: true });
       await fs.rename(staging, args.outputPath);
@@ -1236,6 +1252,7 @@ export async function callTool(name, args = {}) {
           replaceProject: true,
           replaced: true,
           replacedPath: args.outputPath,
+          gui,
           note: '已用导入结果整体替换目标工程（旧骨架不保留，只有导入的这一份）。CLI 导入不写骨架画布尺寸，Size 会变成 unknown；需要的话在 GUI 里设一次 Skeleton Size。',
         }),
         backupPath,
@@ -1243,16 +1260,24 @@ export async function callTool(name, args = {}) {
     }
 
     case 'spine_clean': {
+      const gui = inspectGuiProject({ projectPath: args.inputPath });
       const backupPath = backupIfExists(args.inputPath, args.backup !== false);
-      return withBackup(withReloadHint(await runSpine(cleanArgs({ inputPath: args.inputPath }))), backupPath);
+      const result = await runSpine(cleanArgs({ inputPath: args.inputPath }));
+      return withBackup(withReloadHint({ ...result, gui }), backupPath);
+    }
+
+    case 'spine_gui_status': {
+      return inspectGuiProject({ projectPath: args.projectPath });
     }
 
     case 'spine_reload_gui': {
-      return requestGuiReload({
+      const gui = inspectGuiProject({ projectPath: args.projectPath });
+      const result = await requestGuiReload({
         projectPath: args.projectPath,
         dryRun: args.dryRun === true,
         allowWhenRunning: args.allowWhenRunning !== false,
       });
+      return { ...result, gui };
     }
 
     case 'spine_project_info': {

@@ -57,7 +57,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 `spine_doctor` 的返回里也带同一份指纹（`build.pid` / `build.startedAt` / `build.sourceHash` / `build.toolCount`），不跑脚本也能判断手里的实例是不是旧的。
 
-## 40 个工具
+## 41 个工具
 
 | 工具 | 作用 | 需要 Spine |
 |---|---|---|
@@ -71,6 +71,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `spine_export` | 官方 CLI 导出（`-i / -o / -e`，可选 `-m`）；数据导出 `-o` 是目录，渲染导出 `-o` 是文件基名并回传产物清单 | 是 |
 | `spine_import_json` | 官方 CLI 导入 JSON / binary / 另一个工程的 skeleton（`-r`，可选 `-s`） | 是 |
 | `spine_clean` | 官方 CLI 清理（`-m`） | 是 |
+| `spine_gui_status` | 查 GUI 当前打开的工程（读进程窗口标题，不看 mtime），写操作前的必查项 | 可选 |
 | `spine_reload_gui` | 方案 C：请求 Spine GUI 重新打开工程（官方 Editor 模式），支持 `dryRun` | 可选 |
 | `spine_project_info` | 只读工程信息（`-i` Info），返回原始输出 + 结构化摘要 | 是 |
 | `spine_version` | 启动器版本信息（`--version`），只读 | 是 |
@@ -499,6 +500,22 @@ IoU 是关键——命中率只能证明「落在轮廓里」，IoU 能区分「
 
 ## 与 GUI 联动（方案 C）
 
+### 写操作前先查「GUI 正开着哪个工程」（新工具 `spine_gui_status`）
+
+这是硬规则：**任何会写 `.spine` 的操作之前，先确认目标工程就是 GUI 当前打开的那个**，否则极易改错文件。
+
+```json
+{ "projectPath": "C:/path/to/project.spine" }
+```
+
+返回 `guiRunning` / `pid` / `windowTitle` / `projectName` / `dirty` / `matchesCurrent` / `warnings`。传 `projectPath` 时若它不是当前打开的工程，`warnings` 里会明确提示。
+
+**判据是窗口标题，不是文件 mtime**：打开工程是只读操作，不落盘也就不改 mtime；只有保存才写。实测反例：`spinemcp_test.spine` 的 mtime 停在 01:50，而窗口从 19:59 一直开着它；同一目录下另一个 20:45 刚保存的工程反而不是当前打开的。用 `ls` 的时间戳去猜当前工程，就等于把「最后保存过」当成「正开着」。
+
+实现走 `tasklist /v /fo csv` 的**窗口标题列**（零依赖、不截图、不模拟 UI），用 `TextDecoder("gbk")` 解中文 Windows 的 OEM 输出。标题格式 `Spine - <工程名>`（无扩展名），所以**只能按文件名比对，同名不同目录区分不了**——这点在返回的 `hint` 里有说明。标题尾部带 `*` 时视为可能有未保存改动。
+
+除了显式调用，`spine_import_json`（含 `replaceProject`）、`spine_clean`、`spine_reload_gui` 现在都会自动附一个 `gui` 字段：GUI 没运行、目标不匹配、可能有未保存改动时都能从返回里直接看到，不需要额外调用。
+
 CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不监听磁盘变化，所以 CLI 写完 `.spine` 后窗口里还是旧内容。官方 CLI 没有 reload / watch 参数，`prefs.json` 没有自动重载开关，`hotkeys.txt` 里只有 `Ctrl+O` 打开工程、`Ctrl+S` 保存。
 
 `spine_reload_gui` 用官方 Editor 模式补上这一环：
@@ -599,6 +616,7 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 - **约束 `order` 必须从 0 开始且跨类型连续**：3.8 导入器按「数组位置」重建序号，手写 `order: 1..n` 会抛 `java.lang.RuntimeException: Missing constraint order: 0`，整份骨架都进不去。`spine_edit_constraints` 现在写完会按 ik → transform → path 的数组顺序重排成 0..n−1，并在 `summary.reordered` 里回报（order 0 按 3.8 导出习惯省略字段）。
 - **`curve:"stepped"` 不一定是错误**：3.8 导出时会把「两端值相同」的常量段写成 `curve:"stepped"`，这在语义上就是常量，采样无差异（往返实测最大 0.006°）。把**有变化**的段写成 stepped 才会崩，见上一条。
 - **`transform` 的 `scaleX` 压骨骼长度方向、`scaleY` 压垂直方向**，不是世界 XY；对朝上的躯干，只有 `scaleY` 才是「横向压缩」。
+- **判断 GUI 正打开哪个工程，用窗口标题 `Spine - <工程名>`，不要用文件 mtime**：打开不写盘、mtime 不变；正确判据是 `tasklist /v /fo csv` 的窗口标题列（`spine_gui_status` 已封装）。
 - **CLI 导入不写骨架画布尺寸**：`-r` 生成的骨架一律 `Size: <unknown>`，JSON 里的 `skeleton.width/height` 会被忽略；只有 GUI 的 File → Import Data 会读。
 - **3.8 的贝塞尔控制点不是四点数组**：`curve` 存 cx1，cy1/cx2/cy2 落在同级 `c2`/`c3`/`c4`（默认 0/1/1）。传数组会报 `IllegalStateException: Value cannot be converted to float: array`。
 - stdio 的 stdout 只输出 MCP 消息，日志全走 stderr；配置后若显示「暂无工具」需重启客户端。

@@ -4,14 +4,15 @@
 
 ## 动手前（每次都要）
 
-1. `git -C D:/Spine-Mcp status --short` + `git -C D:/Spine-Mcp log -3 --oneline`：先看有没有别人刚提交或正在改的东西。
-2. `node D:/Spine-Mcp/scripts/check-update.mjs`（等价 `npm run check`）：比对「磁盘上的源码」和「正在跑的 MCP 进程」。
+1. 涉及 Spine 工程操作时，先调 `spine_gui_status`（传目标 `projectPath`）查 GUI 当前打开的工程。判据是窗口标题 `Spine - <工程名>`，**不要靠文件 mtime**；写 `.spine` 前必须确认 `matchesCurrent:true`，GUI 未运行或目标不匹配时先停下核对，不要直接写。
+2. `git -C D:/Spine-Mcp status --short` + `git -C D:/Spine-Mcp log -3 --oneline`：先看有没有别人刚提交或正在改的东西。
+3. `node D:/Spine-Mcp/scripts/check-update.mjs`（等价 `npm run check`）：比对「磁盘上的源码」和「正在跑的 MCP 进程」。
    - 退出码 `0`：一致，可以放心用工具。
    - 退出码 `1`：**进程落后于磁盘**，先重载再调用工具，别拿旧进程的结果当验证结论。
    - 退出码 `2`：没发现活实例，先确认宿主已连上（`spine_doctor` 能返回就是连上了）。
-3. 读 `.workbuddy/memory/MEMORY.md`：WorkBuddy 记录的项目约定、环境事实与已验证/未验证清单。
+4. 读 `.workbuddy/memory/MEMORY.md`：WorkBuddy 记录的项目约定、环境事实与已验证/未验证清单。
 
-> 为什么需要第 2 步：MCP server 是宿主 spawn 的独立进程，`src/*.mjs` 改了它不会热更新，也不报错，只会「工具行为对不上」（典型现象：磁盘上有 9 个工具，会话里只见 8 个）。
+> 为什么需要第 3 步：MCP server 是宿主 spawn 的独立进程，`src/*.mjs` 改了它不会热更新，也不报错，只会「工具行为对不上」（典型现象：磁盘上有 9 个工具，会话里只见 8 个）。
 
 ## 重载 MCP（改完 `src/` 之后必须做）
 
