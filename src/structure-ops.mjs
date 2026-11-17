@@ -444,6 +444,37 @@ function countConstraintKeys(track) {
   return 0;
 }
 
+// 3.8.75 的导入器要求约束 order 从 0 开始、跨类型连续；它实际按「数组位置」重建序号，
+// 所以手写 order:1..n 会直接抛 "Missing constraint order: 0"（整份骨架进不去）。
+// 这里统一按 ik → transform → path 的数组顺序重排成 0..n-1，order 0 按 3.8 导出习惯省略。
+const CONSTRAINT_ORDER_TYPES = ['ik', 'transform', 'path'];
+
+export function normalizeConstraintOrders(json) {
+  const changed = [];
+  let next = 0;
+  for (const type of CONSTRAINT_ORDER_TYPES) {
+    const { arrayKey } = constraintSpec(type);
+    // 不要为工程里本来没有的约束类型凭空建空数组
+    if (!Array.isArray(json?.[arrayKey])) continue;
+    for (const entry of json[arrayKey]) {
+      if (!entry || typeof entry !== 'object') continue;
+      const want = next;
+      next += 1;
+      const had = entry.order;
+      if (want === 0) {
+        if ('order' in entry) {
+          delete entry.order;
+          changed.push({ name: entry.name, type, from: had, to: 0 });
+        }
+      } else if (had !== want) {
+        entry.order = want;
+        changed.push({ name: entry.name, type, from: had, to: want });
+      }
+    }
+  }
+  return changed;
+}
+
 function constraintAnimationRefs(json, type, name) {
   const { animationKey } = constraintSpec(type);
   const hits = [];
@@ -542,6 +573,15 @@ export function modifyConstraints(skeleton, options = {}) {
     }
   } else {
     throw new Error(`未知 mode: ${mode}（可用 list / add / remove / rename / set）`);
+  }
+
+  // 写操作后统一重排 order：3.8 导入要求 0 起连续，否则整份骨架导不进去。
+  const reordered = normalizeConstraintOrders(json);
+  if (reordered.length) {
+    summary.reordered = reordered;
+    summary.warnings.push(
+      `已把约束 order 重排为 0 起连续（${reordered.map((item) => `${item.name}:${item.from ?? 0}→${item.to}`).join(', ')}）；3.8 导入要求 order 从 0 开始且跨类型连续，手写的 1..n 会抛 Missing constraint order: 0`,
+    );
   }
 
   return { json, summary };

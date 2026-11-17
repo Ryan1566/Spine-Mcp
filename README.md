@@ -468,6 +468,34 @@ IoU 是关键——命中率只能证明「落在轮廓里」，IoU 能区分「
 
 用法：`spine_solve_constraints { jsonPath, animationName: "walk" }` 看整条动画的收敛情况；`solve:false` 作为「不求解」基线做对比。
 
+### 伪 3D 转身：约束能表达什么、不能表达什么
+
+场景：`citizen_001`（17 骨骼 / 全 mesh 蒙皮，躯干朝上 rotation≈90°）要做「小幅转身」的类 3D 效果。做法是一根控制骨 `turn_ctrl`（parent `root`）+ 六条 transform 约束，全部静态 mix 默认 0（setup 零侵入），转身幅度只由控制骨的旋转曲线决定，mix 曲线只决定「哪一层跟多少、什么时候跟」。
+
+| order | 约束 | 驱动骨骼 | 静态参数 | 时间线 |
+|---|---|---|---|---|
+| 0 | `turn_hip` | `bone_body_01` | rotation +1.35 | rotateMix 0→0.20 |
+| 1 | `turn_chest` | `bone_body_02` | — | rotateMix 0→0.85 |
+| 2 | `turn_neck` | `bone_neck` | — | rotateMix 0→0.95 |
+| 3 | `turn_head` | `bone_head` | rotation +0.71 | rotateMix 0→1.0 |
+| 4 | `turn_squash` | `bone_body_02` | scaleY −0.08 | scaleMix 0→1 |
+| 5 | `turn_squash_hip` | `bone_body_01` | scaleY −0.06 | scaleMix 0→1 |
+
+实测（峰值帧 t=0.467，控制骨 −16°）：
+
+| 指标 | 单层硬转（只转腰、mix=1） | 分层约束 |
+|---|---|---|
+| 腰 / 胸 / 颈 / 头 世界转角 | −16.0 / −16.0 / −16.0 / −16.0 | −3.2 / −13.4 / −15.0 / −15.1 |
+| 头腰夹角 | 0° | 11.9° |
+| 腿部宽度比（剪影） | 1.212（被甩开） | 0.945（基本保持） |
+| 脚部漂移 | 7.43 单位 | 1.63 单位 |
+| 首末帧与 setup 的偏差 | — | 0.0001 |
+
+**层间梯度只能靠 mix，不能只靠 rotation 偏移**：`transform` 的 `rotation` 语义是「对齐到 target 的世界角 + 偏移」的绝对量，写死偏移只会让各层保持固定夹角；要让层次在时间上拉开、收拢，必须给每层打不同的 mix 曲线。级联顺序（头先到、腰后到）比齐步到位更像真实转身。
+
+**压缩轴别搞反**：`transform` 的 `scaleX` 压的是**骨骼长度方向**，`scaleY` 压的是垂直方向，都不是世界 XY。这个角色躯干 rotation≈90°，所以 `scaleX:-0.12` 实际压的是**身高**（全高比 0.947），`scaleY:-0.12` 才是压肩宽（0.895）。另外压在 `body_01` 上会把整条腿一起压，脚底被抬起 3.13 单位；压在 `body_02` 上脚部位移是 **0.00**。
+
+**做不到的**：2D 骨骼旋转等于倾斜，不等于转身。幅度一大，头就是「歪」而不是「转过去」——脸是单一 mesh，没有左右侧信息。要继续逼真只能上 deform 或做左右半脸/半身的附件切换。
 
 ## 与 GUI 联动（方案 C）
 
@@ -544,6 +572,9 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 - **`transform` 约束时间线写 `curve: "stepped"` 会让导入崩溃**：`java.lang.ArrayIndexOutOfBoundsException: 19`，整份骨架进不去。`ik` / `path` 的 stepped 正常。
 - **约束时间线的字段比定义少**：ik 只有 `mix` / `bendPositive`（`softness` 打不进）；transform 只有四个 Mix（`rotation` / `x` / `y` 偏移不是时间线字段）；path 的 `position` 通道只有 `position`（`spacing` 打不进）。
 - **path 约束的动画键名是单数 `path`**，值是 `{ position: [...], mix: [...] }` 的对象；`ik` / `transform` 的时间线却是**直接一个关键帧数组**，没有通道层。
+- **约束 `order` 必须从 0 开始且跨类型连续**：3.8 导入器按「数组位置」重建序号，手写 `order: 1..n` 会抛 `java.lang.RuntimeException: Missing constraint order: 0`，整份骨架都进不去。`spine_edit_constraints` 现在写完会按 ik → transform → path 的数组顺序重排成 0..n−1，并在 `summary.reordered` 里回报（order 0 按 3.8 导出习惯省略字段）。
+- **`curve:"stepped"` 不一定是错误**：3.8 导出时会把「两端值相同」的常量段写成 `curve:"stepped"`，这在语义上就是常量，采样无差异（往返实测最大 0.006°）。把**有变化**的段写成 stepped 才会崩，见上一条。
+- **`transform` 的 `scaleX` 压骨骼长度方向、`scaleY` 压垂直方向**，不是世界 XY；对朝上的躯干，只有 `scaleY` 才是「横向压缩」。
 - **3.8 的贝塞尔控制点不是四点数组**：`curve` 存 cx1，cy1/cx2/cy2 落在同级 `c2`/`c3`/`c4`（默认 0/1/1）。传数组会报 `IllegalStateException: Value cannot be converted to float: array`。
 - stdio 的 stdout 只输出 MCP 消息，日志全走 stderr；配置后若显示「暂无工具」需重启客户端。
 

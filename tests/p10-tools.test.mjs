@@ -114,7 +114,13 @@ test('modifyConstraints：set 白名单字段、path 目标提示与空变更', 
   const ik = updated.json.ik.find((entry) => entry.name === 'head_ik');
   assert.equal(ik.mix, 0.25);
   assert.equal(ik.bendPositive, false);
-  assert.equal(ik.order, 3);
+  // 3.8 导入要求 order 从 0 开始、跨类型连续（否则抛 Missing constraint order: 0），
+  // 所以写操作后按数组位置重排：head_ik 落到 0（省略），body_tf=1，weapon_path=2。
+  assert.equal(ik.order, undefined);
+  assert.equal(updated.json.transform[0].order, 1);
+  assert.equal(updated.json.path[0].order, 2);
+  assert.ok(updated.summary.reordered.some((item) => item.name === 'head_ik' && item.to === 0));
+  assert.ok(updated.summary.warnings.some((text) => /Missing constraint order/.test(text)));
   assert.deepEqual(updated.summary.updated, [{ name: 'head_ik', fields: ['mix', 'bendPositive', 'order'] }]);
 
   const pathSet = modifyConstraints(source, {
