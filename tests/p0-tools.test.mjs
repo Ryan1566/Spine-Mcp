@@ -147,3 +147,23 @@ test('stdio 集成：新工具可见，生成设置文件不依赖 Spine', async
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('stdio 集成：replaceProject 要求目标工程已存在，不会误建文件', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spine-replace-'));
+  const source = path.join(dir, 'src.json');
+  const missing = path.join(dir, 'missing.spine');
+  fs.writeFileSync(source, JSON.stringify({ skeleton: { spine: '3.8.75' }, bones: [], slots: [], skins: [{}], animations: {} }));
+  try {
+    const responses = await runServer([
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'spine_import_json', arguments: { inputPath: source, outputPath: missing, replaceProject: true } } },
+    ]);
+    const res = responses.find((r) => r.id === 1).result;
+    assert.equal(res.isError, true);
+    assert.match(res.structuredContent.error, /已存在的工程/);
+    // 校验发生在启动 CLI 之前：既不该建出目标文件，也不该留下临时文件
+    assert.equal(fs.existsSync(missing), false);
+    assert.deepEqual(fs.readdirSync(dir), ['src.json']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

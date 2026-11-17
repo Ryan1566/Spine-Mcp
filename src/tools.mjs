@@ -247,14 +247,18 @@ export const TOOLS = [
   },
   {
     name: 'spine_import_json',
-    description: '调用官方 Spine CLI 把 JSON / binary / 另一个 .spine 工程的 skeleton 导入 .spine 工程（`-r`，工程输入已实测）。',
+    description: '调用官方 Spine CLI 把 JSON / binary / 另一个 .spine 工程的 skeleton 导入 .spine 工程（`-r`，工程输入已实测）。replaceProject:true 时改为「原地重生」：先让 CLI 生成到同目录临时文件，成功后再整体替换 outputPath（原文件先备份），用于把改动直接落到 GUI 正开着的工程。',
     inputSchema: {
       type: 'object',
       properties: {
         inputPath: { type: 'string', description: '输入 JSON / skel 绝对路径' },
-        outputPath: { type: 'string', description: '输出 .spine 绝对路径' },
+        outputPath: { type: 'string', description: '输出 .spine 绝对路径；replaceProject:true 时是「要替换的目标工程」，必须已存在' },
         scale: { type: 'number', exclusiveMinimum: 0 },
         skeletonName: { type: 'string' },
+        replaceProject: {
+          type: 'boolean',
+          description: '默认 false。true = 原地替换整个工程（不是追加骨架）：结果工程里只有导入的这一份骨架，JSON 里同名的旧骨架不保留。实测限制：CLI 导入不写骨架画布尺寸，替换后 Size 会变成 unknown（GUI 的 File→Import Data 才会保留），其余骨骼/槽位/皮肤/事件/约束/动画/图片路径都能过。',
+        },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
         backup: { type: 'boolean', description: 'overwrite:true 时写前备份目标工程到系统临时目录，默认 true' },
       },
@@ -1193,15 +1197,49 @@ export async function callTool(name, args = {}) {
     }
 
     case 'spine_import_json': {
+      const replaceProject = args.replaceProject === true;
+      // replaceProject：CLI 只认「导入到已有工程 → 追加骨架」，不能替换同名骨架。
+      // 所以先把结果生成到同目录临时文件，成功后再整体换掉目标，等价于「原地重生」。
+      let staging = null;
+      let cliOutput = args.outputPath;
+      if (replaceProject) {
+        try {
+          await fs.access(args.outputPath);
+        } catch {
+          throw new Error('replaceProject:true 时 outputPath 必须是已存在的工程（要替换的就是它）；新建工程请用 replaceProject:false');
+        }
+        // 临时文件必须保留 .spine 扩展名，否则 CLI 会拒绝写入
+        const base = path.basename(args.outputPath, path.extname(args.outputPath));
+        staging = path.join(path.dirname(args.outputPath), `${base}.importing.spine`);
+        await fs.rm(staging, { force: true });
+        cliOutput = staging;
+      }
       const cliArgs = importArgs({
         inputPath: args.inputPath,
-        outputPath: args.outputPath,
+        outputPath: cliOutput,
         scale: args.scale,
         skeletonName: args.skeletonName,
       });
-      assertWritableOutput(args.outputPath, 'outputPath', args.overwrite === true);
+      if (!replaceProject) assertWritableOutput(args.outputPath, 'outputPath', args.overwrite === true);
       const backupPath = backupIfExists(args.outputPath, args.overwrite === true && args.backup !== false);
-      return withBackup(withReloadHint(await runSpine(cliArgs)), backupPath);
+      const result = await runSpine(cliArgs);
+      if (!replaceProject) return withBackup(withReloadHint(result), backupPath);
+      if (result.success === false) {
+        await fs.rm(staging, { force: true });
+        return withBackup({ ...result, replaceProject: true, replaced: false, note: 'CLI 导入失败，目标工程未改动；临时文件已清理。' }, backupPath);
+      }
+      await fs.rm(args.outputPath, { force: true });
+      await fs.rename(staging, args.outputPath);
+      return withBackup(
+        withReloadHint({
+          ...result,
+          replaceProject: true,
+          replaced: true,
+          replacedPath: args.outputPath,
+          note: '已用导入结果整体替换目标工程（旧骨架不保留，只有导入的这一份）。CLI 导入不写骨架画布尺寸，Size 会变成 unknown；需要的话在 GUI 里设一次 Skeleton Size。',
+        }),
+        backupPath,
+      );
     }
 
     case 'spine_clean': {

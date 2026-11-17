@@ -519,6 +519,30 @@ CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不�
 - **不模拟鼠标键盘、不读写工程文件、不自动保存**。
 - 文件监听式自动重载（检测到 `.spine` 变化就自动触发）尚未实现，避免后台抢焦点，可作为后续扩展。
 
+### 把改动直接落进 GUI 正开着的工程（`replaceProject`）
+
+**先讲清两条硬限制**，别指望「原地改同一个骨架」：
+
+1. `.spine` 不是 JSON，是 **raw deflate 压缩的二进制序列化**（解压 90~96 KB，能看到 `3.8.75`、骨架名、`../images/...` 之类的字符串片段，但整体是 Spine 私有布局）。想加一条约束就得重写整份二进制；实测同一份数据由 GUI 保存和由 CLI 生成，解压后**布局完全不同**（71463 字节差异、字段顺序错位），所以「定位几个字节改掉」也不可行。
+2. CLI 的 `-r` 导入**只能新增骨架**：目标工程已有同名时强制改名（实测 `Skeleton renamed: skeleton -> skeleton2`），没有任何 replace 开关。`--help` 里 Import 只有 `-i / -s / -o / -r [name]` 四个参数。
+
+所以「原地改」只能走**重生整个工程**：`spine_import_json { inputPath, outputPath, skeletonName, replaceProject: true }` 会先把导入结果写到同目录的 `<名>.importing.spine`，CLI 成功后才用它整体替换 `outputPath`（替换前自动备份到系统临时目录）。CLI 失败时目标文件**一个字节都不动**，临时文件自动清理。
+
+配合 `spine_reload_gui` 就是全程零人工：写盘 → 让 GUI 重新加载 → 窗口里直接是新版本。
+
+代价（实测，无法绕过）：
+
+| 内容 | CLI 重建（`replaceProject`） | GUI 的 File → Import Data |
+|---|---|---|
+| 骨骼 / 槽位 / 皮肤 / 事件 / 约束 / 动画 | 全部保留 | 全部保留 |
+| 图片与音频路径 | 保留 | 保留 |
+| 骨架画布尺寸（Skeleton Size） | **变成 unknown** | 保留 |
+| 人工操作 | 0 步 | 4 步 |
+
+尺寸丢失的根源是 CLI 的 Import 根本不读 JSON `skeleton` 块里的 `x/y/width/height`（GUI 的导入器才读）。它只影响编辑器取景，不影响骨骼数据和导出；在 GUI 里设一次即可。
+
+**安全边界**：`replaceProject: true` 要求 `outputPath` 已存在（否则直接报错，不会误建文件）；替换前一定备份；执行前请让用户在 GUI 里 `Ctrl+S`，否则未保存改动会被重载覆盖。
+
 ## 典型工作流：8 帧普攻、F3 命中
 
 Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/fps`。12 fps 下 8 帧 = 0.666667s，命中帧 F3 = **0.166667s**。
@@ -575,6 +599,7 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 - **约束 `order` 必须从 0 开始且跨类型连续**：3.8 导入器按「数组位置」重建序号，手写 `order: 1..n` 会抛 `java.lang.RuntimeException: Missing constraint order: 0`，整份骨架都进不去。`spine_edit_constraints` 现在写完会按 ik → transform → path 的数组顺序重排成 0..n−1，并在 `summary.reordered` 里回报（order 0 按 3.8 导出习惯省略字段）。
 - **`curve:"stepped"` 不一定是错误**：3.8 导出时会把「两端值相同」的常量段写成 `curve:"stepped"`，这在语义上就是常量，采样无差异（往返实测最大 0.006°）。把**有变化**的段写成 stepped 才会崩，见上一条。
 - **`transform` 的 `scaleX` 压骨骼长度方向、`scaleY` 压垂直方向**，不是世界 XY；对朝上的躯干，只有 `scaleY` 才是「横向压缩」。
+- **CLI 导入不写骨架画布尺寸**：`-r` 生成的骨架一律 `Size: <unknown>`，JSON 里的 `skeleton.width/height` 会被忽略；只有 GUI 的 File → Import Data 会读。
 - **3.8 的贝塞尔控制点不是四点数组**：`curve` 存 cx1，cy1/cx2/cy2 落在同级 `c2`/`c3`/`c4`（默认 0/1/1）。传数组会报 `IllegalStateException: Value cannot be converted to float: array`。
 - stdio 的 stdout 只输出 MCP 消息，日志全走 stderr；配置后若显示「暂无工具」需重启客户端。
 
