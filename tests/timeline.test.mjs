@@ -113,6 +113,20 @@ test('校验器能发现缺失的事件定义与倒序时间', () => {
   assert.ok(report.errors.some((e) => e.includes('缺少定义')));
 });
 
+test('校验器支持 3.8 导出的对象式 events', () => {
+  const json = loadFixture();
+  json.events ??= {};
+  json.events.step = {};
+  json.animations.objEvents = {
+    bones: {},
+    events: { step: [{ time: 0.25 }, { time: 0.75 }] },
+  };
+  const report = validateAnimation(json, 'objEvents');
+  assert.equal(report.valid, true);
+  assert.equal(report.stats.eventCount, 2);
+  assert.equal(report.stats.maxTimeSec, 0.75);
+});
+
 // 3.8 的贝塞尔不是数组：curve=cx1 + 同级 c2/c3/c4。传数组必须被翻译，否则 Spine 直接报
 // IllegalStateException: Value cannot be converted to float: array
 test('贝塞尔 4 元数组会被翻译成 3.8 原生 curve+c2/c3/c4 编码', () => {

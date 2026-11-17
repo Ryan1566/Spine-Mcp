@@ -264,7 +264,16 @@ export function validateAnimation(skeleton, animationName) {
       }
     }
   }
-  for (const ev of anim.events ?? []) {
+  // 3.8 导出的 animation.events 是 { eventName: [keys] } 对象；
+  // 内存构造的动画可能是 [{ name, time }] 数组。两种都要校验。
+  const rawEvents = anim.events ?? [];
+  const eventEntries = Array.isArray(rawEvents)
+    ? rawEvents
+    : Object.entries(rawEvents).flatMap(([name, keys]) => {
+        const list = Array.isArray(keys) ? keys : [keys];
+        return list.map((key) => ({ ...(key ?? {}), name: key?.name ?? name }));
+      });
+  for (const ev of eventEntries) {
     const time = ev?.time ?? 0;
     if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) errors.push(`事件 ${ev?.name} 的 time 非法`);
     if (!skeleton.events?.[ev?.name]) errors.push(`顶层 events 缺少定义: ${ev?.name}`);
@@ -280,7 +289,7 @@ export function validateAnimation(skeleton, animationName) {
     stats: {
       boneCount: Object.keys(anim.bones ?? {}).length,
       slotCount: Object.keys(anim.slots ?? {}).length,
-      eventCount: (anim.events ?? []).length,
+      eventCount: eventEntries.length,
       keyframeCount,
       maxTimeSec: round6(maxTime),
     },
