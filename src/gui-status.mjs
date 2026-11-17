@@ -48,14 +48,20 @@ function decodeOem(buffer) {
   }
 }
 
-function parseWindowTitle(title) {
+export function parseWindowTitle(title) {
   const text = String(title ?? '').trim();
   if (!text) return { projectName: null, dirty: false };
   const sep = text.indexOf(' - ');
   if (sep < 0) return { projectName: null, dirty: false };
   let name = text.slice(sep + 3).trim();
-  // 带未保存改动时大多数 Java 桌面应用会在标题尾部加 *
+  // 带未保存改动时 Java 桌面应用可能在标题尾部加 *，Spine 3.8.75 实测是加在**工程名前**：
+  // `Spine - *Turn_AnimTest`。两种位置都要识别，否则会把 dirty 误判为 false，
+  // 并且 projectName 带上 * 导致 matchesCurrent 误判为 false。
   let dirty = false;
+  if (name.startsWith('*')) {
+    dirty = true;
+    name = name.slice(1).trim();
+  }
   if (name.endsWith('*')) {
     dirty = true;
     name = name.slice(0, -1).trim();

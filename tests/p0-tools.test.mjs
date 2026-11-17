@@ -168,6 +168,14 @@ test('gui_status：用窗口标题判据，能核对出「目标不是当前打�
   }
 });
 
+test('gui_status：Spine 3.8.75 的 * 前缀未保存标记也能识别', async () => {
+  const { parseWindowTitle } = await import('../src/gui-status.mjs');
+  assert.deepEqual(parseWindowTitle('Spine - *Turn_AnimTest'), { projectName: 'Turn_AnimTest', dirty: true });
+  assert.deepEqual(parseWindowTitle('Spine - Turn_AnimTest'), { projectName: 'Turn_AnimTest', dirty: false });
+  assert.deepEqual(parseWindowTitle('Spine - Foo*'), { projectName: 'Foo', dirty: true });
+  assert.deepEqual(parseWindowTitle('Spine'), { projectName: null, dirty: false });
+});
+
 test('stdio 集成：gui_status 走协议返回可用判据', async () => {
   const responses = await runServer([
     { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'spine_gui_status', arguments: {} } },
