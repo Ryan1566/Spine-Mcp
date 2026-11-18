@@ -84,7 +84,7 @@ export function compareExportSkeletons(sourceParsed, items) {
   return { ok: mismatches.length === 0 && missing.length === 0 && binaryProblems.length === 0, matched, missing, mismatches, binaryProblems };
 }
 
-export async function verifyExport({ projectPath, exportDir, includeBinary = true } = {}) {
+export async function verifyExport({ projectPath, exportDir, includeBinary = true } = {}, files) {
   assertSafePath(projectPath, 'projectPath', { mustExist: true });
   let stat;
   try {
@@ -99,14 +99,14 @@ export async function verifyExport({ projectPath, exportDir, includeBinary = tru
     throw new Error(`无法读取源工程信息: ${projectPath}`);
   }
 
-  const entries = await fs.readdir(exportDir);
+  const entries = files ?? await fs.readdir(exportDir);
   const jsonFiles = entries.filter((f) => /\.json$/i.test(f));
   const skelFiles = includeBinary ? entries.filter((f) => /\.skel$/i.test(f)) : [];
 
   const items = [];
   for (const file of jsonFiles) {
     const result = await projectInfo(path.join(exportDir, file));
-    items.push({ file, kind: 'json', parsed: result.parsed, exitCode: result.exitCode });
+    items.push({ file, kind: 'json', parsed: result.success ? result.parsed : null, exitCode: result.exitCode });
   }
   for (const file of skelFiles) {
     const parsed = await parseSkelFile(path.join(exportDir, file));

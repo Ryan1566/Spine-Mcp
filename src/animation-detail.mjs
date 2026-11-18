@@ -1,9 +1,9 @@
 // P5：动画时间轴明细与基础编辑。纯 JSON 操作，不调用 CLI、不修改源对象。
 import { round6, validateAnimation } from './timeline.mjs';
+import { animationTimelines, isEventTimeline, isTimelineKey, timelinePath } from './animation-timelines.mjs';
 
 const NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
-const hasTime = (value) => isObject(value) && (value.time === undefined || (typeof value.time === 'number' && Number.isFinite(value.time)));
 const keyTime = (key) => key.time ?? 0;
 
 function assertAnimationName(name, label = 'animationName') {
@@ -16,54 +16,17 @@ function assertFinite(value, label) {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${label} 必须是有限数字`);
 }
 
-function* timelineEntries(animation) {
-  // events / drawOrder 是动画直属数组；draworder 兼容旧导出拼写。
-  for (const [type, keys] of Object.entries(animation ?? {})) {
-    if (!Array.isArray(keys) || !keys.every(hasTime)) continue;
-    yield { category: 'animation', target: null, type, keys, assign: (value) => { animation[type] = value; } };
-  }
-  // bones / slots / ik / transform / path：target -> timeline -> keys。
-  // 注意 path 约束的键名是单数 path，值是 { position: [...], mix: [...] } 的嵌套对象。
-  // ik / transform 的约束时间线却是**直接一个关键帧数组**，没有中间通道层，必须单独认。
-  for (const category of ['bones', 'slots', 'ik', 'transform', 'path']) {
-    for (const [target, timelines] of Object.entries(animation?.[category] ?? {})) {
-      if (Array.isArray(timelines) && timelines.every(hasTime)) {
-        yield {
-          category, target, type: 'default', keys: timelines,
-          assign: (value) => { animation[category][target] = value; },
-        };
-        continue;
-      }
-      for (const [type, keys] of Object.entries(timelines ?? {})) {
-        if (!Array.isArray(keys) || !keys.every(hasTime)) continue;
-        yield { category, target, type, keys, assign: (value) => { animation[category][target][type] = value; } };
-      }
-    }
-  }
-  // deform：skin -> slot -> attachment -> keys。
-  for (const [skin, slots] of Object.entries(animation?.deform ?? {})) {
-    for (const [slot, attachments] of Object.entries(slots ?? {})) {
-      for (const [attachment, keys] of Object.entries(attachments ?? {})) {
-        if (!Array.isArray(keys) || !keys.every(hasTime)) continue;
-        yield {
-          category: 'deform', target: `${skin}/${slot}/${attachment}`, type: 'deform', keys,
-          assign: (value) => { animation.deform[skin][slot][attachment] = value; },
-        };
-      }
-    }
+function* readableTimelines(animation) {
+  for (const entry of animationTimelines(animation)) {
+    if (Array.isArray(entry.keys) && entry.keys.every(isTimelineKey)) yield entry;
   }
 }
 
 function curveKind(key) {
   if (key.curve === undefined) return 'linear';
   if (key.curve === 'stepped') return 'stepped';
-  if (Array.isArray(key.curve)) return 'bezier';
+  if (typeof key.curve === 'number' || Array.isArray(key.curve)) return 'bezier';
   return typeof key.curve;
-}
-
-// 给体检 / 编辑复用的时间轴清单；不暴露内部 assign 闭包。
-export function collectAnimationTimelines(animation) {
-  return [...timelineEntries(animation)].map(({ category, target, type, keys }) => ({ category, target, type, keys }));
 }
 
 export function inspectAnimation(skeleton, animationName, { includeKeyframes = true, maxKeyframes = 1000 } = {}) {
@@ -74,21 +37,25 @@ export function inspectAnimation(skeleton, animationName, { includeKeyframes = t
   let totalKeyframes = 0;
   let includedKeyframes = 0;
   let duration = 0;
+  let eventCount = 0;
   const curveTypes = new Set();
 
-  for (const entry of timelineEntries(animation)) {
+  for (const entry of readableTimelines(animation)) {
     const count = entry.keys.length;
     totalKeyframes += count;
     const remaining = Math.max(0, maxKeyframes - includedKeyframes);
     const keys = includeKeyframes ? entry.keys.slice(0, remaining) : [];
     includedKeyframes += keys.length;
-    for (const key of entry.keys) curveTypes.add(curveKind(key));
-    if (count > 0) duration = Math.max(duration, ...entry.keys.map(keyTime));
+    for (const key of entry.keys) {
+      curveTypes.add(curveKind(key));
+      duration = Math.max(duration, keyTime(key));
+    }
+    if (isEventTimeline(entry)) eventCount += count;
     timelines.push({
       category: entry.category,
       target: entry.target,
       type: entry.type,
-      path: [entry.category, entry.target, entry.type].filter(Boolean).join('.'),
+      path: timelinePath(entry),
       keyframeCount: count,
       startTimeSec: count ? round6(keyTime(entry.keys[0])) : null,
       endTimeSec: count ? round6(keyTime(entry.keys[count - 1])) : null,
@@ -112,7 +79,7 @@ export function inspectAnimation(skeleton, animationName, { includeKeyframes = t
       transform: Object.keys(animation.transform ?? {}).length,
       paths: Object.keys(animation.path ?? {}).length,
       deformSkins: Object.keys(animation.deform ?? {}).length,
-      events: (animation.events ?? []).length,
+      events: eventCount,
       drawOrder: (animation.drawOrder ?? animation.draworder ?? []).length,
     },
     timelines,
@@ -120,11 +87,11 @@ export function inspectAnimation(skeleton, animationName, { includeKeyframes = t
   };
 }
 
-function transformKeys(animation, mode, options) {
+export function transformAnimationTimes(animation, mode, options) {
   let changed = 0;
   let removed = 0;
   const epsilon = 1e-9;
-  for (const entry of timelineEntries(animation)) {
+  for (const entry of readableTimelines(animation)) {
     let keys = entry.keys.map((key) => ({ ...structuredClone(key), time: round6(keyTime(key) * options.scale + options.offset) }));
     if (mode === 'crop') {
       const before = keys.length;
@@ -132,7 +99,8 @@ function transformKeys(animation, mode, options) {
       removed += before - keys.length;
     }
     for (let index = 1; index < keys.length; index += 1) {
-      if (keys[index].time <= keys[index - 1].time) {
+      const delta = keys[index].time - keys[index - 1].time;
+      if (delta < 0 || (delta === 0 && !isEventTimeline(entry))) {
         throw new Error(`时间变换后 ${entry.category}/${entry.target ?? ''}/${entry.type} 出现重复或倒序关键帧，请调整 scale / offset / crop`);
       }
     }
@@ -184,7 +152,7 @@ export function editAnimation(skeleton, options = {}) {
     if (options.start < 0 || options.end <= options.start) throw new Error('crop 需要 0 <= start < end');
     crop = { start: options.start, end: options.end };
   }
-  const changes = transformKeys(animation, mode, { scale, offset, ...crop });
+  const changes = transformAnimationTimes(animation, mode, { scale, offset, ...crop });
   Object.assign(summary, changes, {
     scale,
     offset: round6(offset),

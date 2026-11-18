@@ -9,10 +9,71 @@ import { projectInfoArgs, parseProjectInfo } from '../src/project-info.mjs';
 import { SUPPORTED_FORMATS, buildExportSettings, makeExportSettings } from '../src/export-settings.mjs';
 import { RELOAD_HINT, GUI_RUNNING_HINT } from '../src/gui-link.mjs';
 import { TOOLS, withReloadHint } from '../src/tools.mjs';
+import { replaceProjectFromImport } from '../src/spine-cli.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const existingFile = path.join(here, '..', 'fixtures', 'hero.json');
 const serverPath = path.join(here, '..', 'src', 'index.mjs');
+
+test('replaceProject：默认备份，只有同一已保存工程才提交临时产物', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spine-replace-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, `${path.basename(dir)}.spine`);
+  const options = { inputPath: existingFile, outputPath: target };
+  fs.writeFileSync(target, 'original');
+  const originalFiles = fs.readdirSync(dir);
+  const saved = { matchesCurrent: true, dirty: false };
+  let gui = saved;
+  let stage;
+  const inspectGui = () => gui;
+  const writeStage = (args) => {
+    stage = args[args.indexOf('-o') + 1];
+    assert.equal(path.dirname(stage), dir);
+    assert.notEqual(stage, target);
+    fs.writeFileSync(stage, 'imported');
+    return { success: true };
+  };
+
+  await assert.rejects(replaceProjectFromImport(options, {
+    inspectGui: () => ({ matchesCurrent: false, dirty: false }),
+    run: () => assert.fail('工程不匹配时不能调用 CLI'),
+  }), /spine_gui_status/);
+  const missing = await replaceProjectFromImport(options, { inspectGui, run: () => ({ success: true }) });
+  assert.equal(missing.replaced, false);
+  assert.equal(missing.success, false);
+  const failed = await replaceProjectFromImport(options, {
+    inspectGui, run: (args) => ({ ...writeStage(args), success: false, exitCode: 1 }),
+  });
+  assert.equal(failed.replaced, false);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'original');
+  assert.deepEqual(fs.readdirSync(dir), originalFiles);
+
+  await assert.rejects(replaceProjectFromImport(options, {
+    inspectGui,
+    run: (args) => {
+      gui = { ...saved, dirty: true };
+      return writeStage(args);
+    },
+  }), /spine_gui_status/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'original');
+  gui = saved;
+  await assert.rejects(replaceProjectFromImport(options, {
+    inspectGui,
+    run: (args) => {
+      fs.writeFileSync(target, 'external save');
+      return writeStage(args);
+    },
+  }), /目标工程已变化/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'external save');
+  assert.deepEqual(fs.readdirSync(dir), originalFiles);
+
+  const result = await replaceProjectFromImport(options, { inspectGui, run: writeStage });
+  t.after(() => fs.rmSync(result.backupPath, { force: true }));
+  assert.equal(result.replaced, true);
+  assert.equal(fs.readFileSync(result.backupPath, 'utf8'), 'external save');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'imported');
+  assert.deepEqual(fs.readdirSync(dir), originalFiles);
+});
 
 const INFO_STDOUT = [
   'Spine Launcher 3.8.75',

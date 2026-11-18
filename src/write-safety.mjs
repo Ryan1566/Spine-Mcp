@@ -64,6 +64,7 @@ async function atomicWriteJson(outputPath, json) {
 
 export async function writeJsonCopy({
   sourceSkeleton,
+  sourcePaths = [],
   outputJsonPath,
   json,
   overwrite = false,
@@ -74,6 +75,14 @@ export async function writeJsonCopy({
   assertSafePath(outputJsonPath, label);
   if (!isPlainObject(json)) throw new Error('json 必须是 skeleton 对象');
   const outputExists = fs.existsSync(outputJsonPath);
+  if (outputExists && sourcePaths.length) {
+    const canonical = (file) => process.platform === 'win32' ? file.toLowerCase() : file;
+    const output = canonical(await fsp.realpath(outputJsonPath));
+    const inputs = await Promise.all(sourcePaths.map((file) => fsp.realpath(file)));
+    if (inputs.some((file) => canonical(file) === output)) {
+      throw new Error(`${label} 指向输入 JSON；请指定独立的输出路径`);
+    }
+  }
   const changes = describeJsonChanges(sourceSkeleton, json);
   const wouldWrite = !outputExists || overwrite === true;
 

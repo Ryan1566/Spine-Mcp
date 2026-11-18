@@ -1,7 +1,6 @@
 // P5：skeleton JSON 只读体检。只分析传入对象，不调用 CLI、不访问源图片、不写文件。
 import { inspectWeights } from './weight-ops.mjs';
 import { validateAnimation } from './timeline.mjs';
-import { collectAnimationTimelines } from './animation-detail.mjs';
 
 const isObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const round6 = (value) => Math.round(value * 1e6) / 1e6;
@@ -69,7 +68,8 @@ function auditAnimationReferences(skeleton, animationName, animation, add) {
     }
   }
 
-  for (const key of animation?.drawOrder ?? animation?.draworder ?? []) {
+  const drawOrder = animation?.drawOrder ?? animation?.draworder;
+  for (const key of Array.isArray(drawOrder) ? drawOrder : []) {
     for (const offset of key?.offsets ?? []) {
       if (!slots.has(offset?.slot)) add('error', 'animation.drawOrder', `动画 ${animationName} 的 drawOrder 引用了不存在的插槽: ${offset?.slot}`, { animationName, slotName: offset?.slot });
     }
@@ -168,23 +168,6 @@ export function auditProject(skeleton) {
     const report = validateAnimation(skeleton, name);
     for (const message of report.errors) add('error', 'animation.timeline', message, { animationName: name });
     for (const message of report.warnings) add('warning', 'animation.timeline', message, { animationName: name });
-    // 骨骼时间轴已由 validateAnimation 检查；这里补 slots / ik / transform / paths / deform / events / drawOrder 等所有类型。
-    for (const timeline of collectAnimationTimelines(animation)) {
-      if (timeline.category === 'bones') continue;
-      const label = [timeline.category, timeline.target, timeline.type].filter(Boolean).join('.');
-      let previous = -1;
-      for (const [index, key] of timeline.keys.entries()) {
-        const time = key?.time ?? 0;
-        if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) {
-          if (timeline.category !== 'animation' || timeline.type !== 'events') {
-            add('error', 'animation.timeline', `动画 ${name} 的 ${label} 第 ${index + 1} 个关键帧 time 非法`, { animationName: name, timeline: label });
-          }
-          continue;
-        }
-        if (time <= previous) add('error', 'animation.timeline', `动画 ${name} 的 ${label} 关键帧 time 未严格递增`, { animationName: name, timeline: label });
-        previous = time;
-      }
-    }
     auditAnimationReferences(skeleton, name, animation, add);
     animationReports.push({ name, valid: report.valid && !issues.some((issue) => issue.animationName === name && issue.severity === 'error'), ...report.stats });
   }

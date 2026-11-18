@@ -168,6 +168,8 @@ node scripts/check-update.mjs      # 等价 npm run check
 
 ## P7：导出工作流与写操作安全
 
+写 JSON 副本时，输出路径须与所有输入 JSON 分开。`overwrite:true` 用于更新已有的副本。
+
 - **`spine_export_workflow`**：一次调用完成「生成导出设置 → 批量导出 → 可选产物校验」。未提供设置时自动生成到**系统临时目录**，导出结束默认删除；`dryRun:true` 只返回计划，不建目录、不写设置、不调用 CLI。工作流**不开启 `cleanUp`**，不改动源工程。工作流只做 `json` / `binary`：它的 `-o` 是目录语义，而渲染导出的 `-o` 是文件基名，批量跑会互相覆盖，所以 `png` / `mov` / `avi` / `gif` 请直接调 `spine_export`（见 P9）。多工程矩阵与统一产物报告见 P11，图集打包串联见 P12。
 - **binary 扩展名修正**：实测 3.8.75 的 `export-binary` 按 `extension` 决定产物名；此前设置里沿用 `.json`，产物内容是二进制但文件名误导。现已改为 **`.skel`**，并重新用官方 raptor 端到端验证。
 - **官方 raptor 实测**：同一工程走一次工作流导出 JSON + Binary（2 个 job），产物 `raptor-pro.json`、`raptor-pro.skel`、atlas 与 png 齐全；`verify:true` 对 `.json` / `.skel` 分别跑官方 `-i` Info，**骨骼 74 / 插槽 36 / 动画 5 全部匹配，ok=true**；源 `.spine` 哈希不变。
@@ -244,7 +246,8 @@ node scripts/check-update.mjs      # 等价 npm run check
 ```
 
 - **矩阵**：`projects`（可继续用 `projectPath`）与 `formats`（可继续用 `format`）做笛卡尔积，每个「工程 × 格式」一个 job；同一工程重复传入会去重。
-- **布局**：单工程时沿用原行为，产物直接落在 `outputDir`；多工程时每个工程一个子目录 `outputDir/<序号>-<工程名>`，避免两个工程里同名 skeleton 的 `.json` / `.skel` 互相覆盖。
+- **布局**：单工程时产物直接落在 `outputDir`。多个工程时，每个工程使用 `outputDir/<序号>-<工程名>`，包括通过 `extraInputs` 提供的不同工程。
+- **产物检查**：CLI 退出成功且写出新的主产物才算该 job 成功。开启 `verify` 后，`verification` 报告本次生成产物的校验结果，二进制走本地结构解析。
 - **逐 job 调用**：每个 job 单独启动一次 CLI（不再合成一次多组 `-i/-e`），这样产物可以按 job 归属，mtime 也能精确过滤本次新增文件。
 - **统一报告**：`report` 给出 `jobCount` / `succeeded` / `failed` / `fileCount` / `primaryFiles` / `byproductFiles` / `totalBytes` / `byFormat`；每个 job 还有 `runs[].files`（含 `primary` 标记）与 `runs[].totalBytes`。
   - `primary` = 与该 job 格式对应的主产物（`.json` / `.skel`）；`atlas.txt`、`.png` 这类同目录附带产物记为 byproduct，按路径去重后只统计一次。
@@ -543,9 +546,9 @@ CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不�
 1. `.spine` 不是 JSON，是 **raw deflate 压缩的二进制序列化**（解压 90~96 KB，能看到 `3.8.75`、骨架名、`../images/...` 之类的字符串片段，但整体是 Spine 私有布局）。想加一条约束就得重写整份二进制；实测同一份数据由 GUI 保存和由 CLI 生成，解压后**布局完全不同**（71463 字节差异、字段顺序错位），所以「定位几个字节改掉」也不可行。
 2. CLI 的 `-r` 导入**只能新增骨架**：目标工程已有同名时强制改名（实测 `Skeleton renamed: skeleton -> skeleton2`），没有任何 replace 开关。`--help` 里 Import 只有 `-i / -s / -o / -r [name]` 四个参数。
 
-所以「原地改」只能走**重生整个工程**：`spine_import_json { inputPath, outputPath, skeletonName, replaceProject: true }` 会先把导入结果写到同目录的 `<名>.importing.spine`，CLI 成功后才用它整体替换 `outputPath`（替换前自动备份到系统临时目录）。CLI 失败时目标文件**一个字节都不动**，临时文件自动清理。
+如需重生整个工程，用 `spine_import_json { inputPath, outputPath, skeletonName, replaceProject: true }`。工具先在同目录生成独立的临时工程，确认有非空产物后再用同目录重命名替换原件。默认先备份到系统临时目录。CLI 失败或文件替换失败时保留原件并清理临时文件。
 
-配合 `spine_reload_gui` 就是全程零人工：写盘 → 让 GUI 重新加载 → 窗口里直接是新版本。
+替换成功后，用 `spine_reload_gui` 或 Ctrl+O 重新打开磁盘版本。重载前避免保存 GUI 内存中的旧版本。
 
 代价（实测，无法绕过）：
 
@@ -558,11 +561,11 @@ CLI 与 Spine 编辑器是两个独立进程：GUI 把工程读进内存，不�
 
 尺寸丢失的根源是 CLI 的 Import 根本不读 JSON `skeleton` 块里的 `x/y/width/height`（GUI 的导入器才读）。它只影响编辑器取景，不影响骨骼数据和导出；在 GUI 里设一次即可。
 
-**安全边界**：`replaceProject: true` 要求 `outputPath` 已存在（否则直接报错，不会误建文件）；替换前一定备份；执行前请让用户在 GUI 里 `Ctrl+S`，否则未保存改动会被重载覆盖。
+**安全边界**：`replaceProject: true` 要求 `outputPath` 是已有的 `.spine` 文件，且导入前后 GUI 标题均与目标匹配、没有未保存改动。若导入期间检测到目标文件改变，也会中止替换。窗口标题只能核对工程名，同名工程还需核对路径。保留默认备份，除非明确传 `backup: false`。
 
 ## 典型工作流：8 帧普攻、F3 命中
 
-Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/fps`。12 fps 下 8 帧 = 0.666667s，命中帧 F3 = **0.166667s**。
+Spine 时间轴以秒记录。第 N 帧（1-based）的起始时间为 `(N-1)/fps`。12 fps 下 8 格的帧预算 `durationSec` 是 0.666667s，F3 从 0.166667s 开始。若 F8 是最后一个关键帧，生成摘要中的 `timelineEndSec` 是 0.583333s。生成器保留传入的关键帧时间。
 
 1. `spine_export` 把 `.spine` 导成 JSON（必须给 `exportSettingsPath`）。
 2. `spine_inspect_json` 确认骨骼名，例如 `weapon`、`head`。
@@ -594,7 +597,7 @@ Spine 时间轴用**秒**不是帧，第 N 帧（1-based）的时间是 `(N-1)/f
 }
 ```
 
-事件名若不在源 JSON 的顶层 `events` 里会自动补齐定义；伤害数字、震屏、音效都挂 `time=0.166667` 这一帧。
+事件名若不在源 JSON 的顶层 `events` 里，生成器会补齐定义。同一时刻可放多个事件，播放和玩法判定按项目的运行时契约处理。
 
 5. `spine_validate_timeline` 校验。
 6. `spine_import_json` 导回 `.spine`，人工在编辑器里复核。

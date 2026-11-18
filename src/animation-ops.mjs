@@ -1,6 +1,8 @@
 // P3：纯 JSON 层的动画操作，不调用 Spine CLI、不改 GUI、不写源文件。
 // 所有写操作都返回新的对象（structuredClone），由工具层决定写到哪个副本文件。
 import { buildCombatAnimation } from './timeline.mjs';
+import { transformAnimationTimes } from './animation-detail.mjs';
+import { animationEvents, eventTimelines } from './animation-timelines.mjs';
 
 // 键顺序无关的稳定序列化，避免同一份动画因为属性顺序被误判为「有差异」。
 function stable(value) {
@@ -27,7 +29,7 @@ function animationStats(anim) {
       if (Array.isArray(keys)) keyframes += keys.length;
     }
   }
-  return { keyframes, events: (anim?.events ?? []).length };
+  return { keyframes, events: [...animationEvents(anim)].length };
 }
 
 export function diffAnimations(base, other) {
@@ -64,18 +66,6 @@ export function diffAnimations(base, other) {
   };
 }
 
-function shiftTimes(value, offset, inKeyArray = false) {
-  if (Array.isArray(value)) {
-    for (const item of value) shiftTimes(item, offset, true);
-  } else if (value && typeof value === 'object') {
-    if (typeof value.time === 'number' || (inKeyArray && value.time === undefined)) {
-      value.time = Math.round(((value.time ?? 0) + offset) * 1e6) / 1e6;
-      if (value.time < 0) throw new Error(`timeOffset=${offset} 会产生负 time`);
-    }
-    for (const item of Object.values(value)) shiftTimes(item, offset);
-  }
-}
-
 function prepareMergedAnimation(base, sourceAnimation, { boneMap = {}, timeOffset = 0, skipMissingBones = false }) {
   if (!boneMap || typeof boneMap !== 'object' || Array.isArray(boneMap)) throw new Error('boneMap 必须是 { donor骨骼名: base骨骼名 } 对象');
   if (typeof timeOffset !== 'number' || !Number.isFinite(timeOffset)) throw new Error('timeOffset 必须是有限数字');
@@ -101,7 +91,7 @@ function prepareMergedAnimation(base, sourceAnimation, { boneMap = {}, timeOffse
   }
   if (Object.keys(bones).length) animation.bones = bones;
   else delete animation.bones;
-  if (timeOffset !== 0) shiftTimes(animation, timeOffset);
+  if (timeOffset !== 0) transformAnimationTimes(animation, 'shift', { scale: 1, offset: timeOffset });
   return { animation, remappedBones, missingBones, droppedBoneTracks };
 }
 
@@ -137,7 +127,7 @@ export function mergeAnimations(base, donor, { animationNames, overwrite = false
   const eventsAdded = [];
   const used = new Set();
   for (const name of merged) {
-    for (const ev of json.animations[name].events ?? []) used.add(ev.name);
+    for (const ev of animationEvents(json.animations[name])) used.add(ev.name);
   }
   for (const eventName of used) {
     if (!json.events[eventName]) {
@@ -155,7 +145,7 @@ export function mergeAnimations(base, donor, { animationNames, overwrite = false
 export function listEvents(skeleton) {
   const usedBy = new Map();
   for (const [animationName, anim] of Object.entries(skeleton?.animations ?? {})) {
-    for (const ev of anim?.events ?? []) {
+    for (const ev of animationEvents(anim)) {
       const list = usedBy.get(ev.name) ?? [];
       list.push(animationName);
       usedBy.set(ev.name, list);
@@ -202,7 +192,7 @@ export function manageEvents(skeleton, { mode = 'list', events = [], rename, def
       delete json.events[name];
       summary.removed.push(name);
       for (const [animationName, anim] of Object.entries(json.animations ?? {})) {
-        if ((anim.events ?? []).some((ev) => ev.name === name)) {
+        if ([...animationEvents(anim)].some((ev) => ev.name === name)) {
           summary.warnings.push(`动画 ${animationName} 仍引用已删除的事件 ${name}`);
         }
       }
@@ -215,8 +205,20 @@ export function manageEvents(skeleton, { mode = 'list', events = [], rename, def
     json.events[to] = json.events[from];
     delete json.events[from];
     for (const anim of Object.values(json.animations ?? {})) {
-      for (const ev of anim.events ?? []) {
-        if (ev.name === from) ev.name = to;
+      for (const { target, keys } of eventTimelines(anim)) {
+        if (!Array.isArray(keys)) continue;
+        for (const ev of keys) {
+          if (ev?.name === from) ev.name = to;
+        }
+        if (target !== from) continue;
+        const group = anim.events[from];
+        if (Object.hasOwn(anim.events, to)) {
+          const combined = [anim.events[to], group].flat();
+          anim.events[to] = combined.sort((a, b) => (a?.time ?? 0) - (b?.time ?? 0));
+        } else {
+          anim.events[to] = group;
+        }
+        delete anim.events[from];
       }
     }
     summary.renamed.push({ from, to });

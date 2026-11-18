@@ -1,5 +1,6 @@
 // 帧规格 -> Spine 3.8 JSON 时间轴。
 // Spine 的时间轴单位是「秒」，不是帧；第 N 帧（1-based）的时间是 (N-1)/fps。
+import { animationTimelines, isEventTimeline, isTimelineKey, timelinePath } from './animation-timelines.mjs';
 
 export const DEFAULT_FPS = 12;
 const PRECISION = 1e6;
@@ -64,7 +65,7 @@ export function frameTable(frames, fps = DEFAULT_FPS, eventFrames = []) {
     fps,
     frames,
     durationSec: durationSeconds(frames, fps),
-    note: 'Spine 时间轴用秒；第 N 帧 = (N-1)/fps。事件帧请挂换算后的 timeSec。',
+    note: '第 N 帧 = (N-1)/fps；durationSec 是帧预算，不是最后一帧的 timeSec。',
     rows,
   };
 }
@@ -191,6 +192,7 @@ export function buildCombatAnimation(skeleton, spec = {}) {
       name: key.attachment ?? null,
     });
   }
+  for (const slot of Object.values(slots)) slot.attachment.sort((a, b) => a.time - b.time);
   if (Object.keys(slots).length > 0) animation.slots = slots;
 
   json.events ??= {};
@@ -214,6 +216,8 @@ export function buildCombatAnimation(skeleton, spec = {}) {
   if (events.length > 0) animation.events = events.sort((a, b) => a.time - b.time);
 
   json.animations[animationName] = animation;
+  const report = validateAnimation(json, animationName);
+  if (!report.valid) throw new Error(`生成的时间轴校验失败: ${report.errors.join('；')}`);
 
   return {
     json,
@@ -222,6 +226,7 @@ export function buildCombatAnimation(skeleton, spec = {}) {
       fps,
       frames,
       durationSec: durationSeconds(frames, fps),
+      timelineEndSec: report.stats.maxTimeSec,
       boneCount: Object.keys(bones).length,
       eventCount: events.length,
       eventTimes: events.map((e) => ({ name: e.name, timeSec: e.time })),
@@ -239,47 +244,51 @@ export function validateAnimation(skeleton, animationName) {
     return { valid: false, errors: [`动画不存在: ${animationName}`], warnings, stats: null };
   }
   const boneNames = new Set((skeleton.bones ?? []).map((b) => b?.name).filter(Boolean));
+  const slotNames = new Set((skeleton.slots ?? []).map((s) => s?.name).filter(Boolean));
   let keyframeCount = 0;
   let maxTime = 0;
+  let eventCount = 0;
 
-  for (const [bone, timelines] of Object.entries(anim.bones ?? {})) {
+  for (const bone of Object.keys(anim.bones ?? {})) {
     if (!boneNames.has(bone)) errors.push(`动画引用了不存在的骨骼: ${bone}`);
-    for (const [kind, keys] of Object.entries(timelines ?? {})) {
-      if (!Array.isArray(keys)) {
-        errors.push(`${bone}.${kind} 不是数组`);
+  }
+  for (const slot of Object.keys(anim.slots ?? {})) {
+    if (!slotNames.has(slot)) errors.push(`动画引用了不存在的插槽: ${slot}`);
+  }
+  let hasKeys = false;
+  for (const entry of animationTimelines(anim)) {
+    const { category, target, keys } = entry;
+    const label = timelinePath(entry);
+    if (!Array.isArray(keys)) {
+      errors.push(`${label} 不是数组`);
+      continue;
+    }
+    const events = isEventTimeline(entry);
+    if (keys.length) hasKeys = true;
+    let previous = -1;
+    for (const key of keys) {
+      if (category === 'bones') keyframeCount += 1;
+      if (events) {
+        eventCount += 1;
+        const name = key?.name ?? target;
+        if (typeof name !== 'string' || !Object.hasOwn(skeleton.events ?? {}, name)) {
+          errors.push(`顶层 events 缺少定义: ${name}`);
+        }
+      }
+      if (!isTimelineKey(key) || (key.time ?? 0) < 0) {
+        errors.push(`${label} 存在非法 time 或关键帧`);
         continue;
       }
-      let previous = -1;
-      for (const key of keys) {
-        keyframeCount += 1;
-        // Spine JSON 会省略默认值，首帧 time=0 常写成 {}。
-        const time = key?.time ?? 0;
-        if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) {
-          errors.push(`${bone}.${kind} 存在非法 time`);
-          continue;
-        }
-        if (time <= previous) errors.push(`${bone}.${kind} 的 time 未严格递增`);
-        previous = time;
-        maxTime = Math.max(maxTime, time);
+      // 同一时刻可以发送多条事件，其他通道的关键帧必须严格递增。
+      const time = key.time ?? 0;
+      if (time < previous || (!events && time === previous)) {
+        errors.push(`${label} 的 time 未${events ? '按时间排序' : '严格递增'}`);
       }
+      previous = time;
+      maxTime = Math.max(maxTime, time);
     }
   }
-  // 3.8 导出的 animation.events 是 { eventName: [keys] } 对象；
-  // 内存构造的动画可能是 [{ name, time }] 数组。两种都要校验。
-  const rawEvents = anim.events ?? [];
-  const eventEntries = Array.isArray(rawEvents)
-    ? rawEvents
-    : Object.entries(rawEvents).flatMap(([name, keys]) => {
-        const list = Array.isArray(keys) ? keys : [keys];
-        return list.map((key) => ({ ...(key ?? {}), name: key?.name ?? name }));
-      });
-  for (const ev of eventEntries) {
-    const time = ev?.time ?? 0;
-    if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) errors.push(`事件 ${ev?.name} 的 time 非法`);
-    if (!skeleton.events?.[ev?.name]) errors.push(`顶层 events 缺少定义: ${ev?.name}`);
-    maxTime = Math.max(maxTime, time);
-  }
-  if (!anim.bones && !anim.slots && !anim.events) warnings.push('动画没有任何时间轴或事件');
+  if (!hasKeys) warnings.push('动画没有任何时间轴或事件');
   if (maxTime > 120) warnings.push(`动画末尾时间 ${maxTime}s 偏长，请确认帧数与 fps`);
 
   return {
@@ -289,7 +298,7 @@ export function validateAnimation(skeleton, animationName) {
     stats: {
       boneCount: Object.keys(anim.bones ?? {}).length,
       slotCount: Object.keys(anim.slots ?? {}).length,
-      eventCount: eventEntries.length,
+      eventCount,
       keyframeCount,
       maxTimeSec: round6(maxTime),
     },

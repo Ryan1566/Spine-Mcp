@@ -122,6 +122,52 @@ test('runExportWorkflow：dryRun 矩阵不落盘', async () => {
   }
 });
 
+test('extraInputs 的不同工程使用独立目录，同一工程的格式仍共用目录', () => {
+  const plan = buildExportWorkflowPlan({
+    projectPath: fixtureA, outputDir: 'out',
+    extraInputs: [{ inputPath: fixtureA, format: 'binary' }, { inputPath: fixtureB }],
+    dryRun: true,
+  });
+  assert.equal(plan.layout, 'perProject');
+  assert.deepEqual(plan.projects, [fixtureA, fixtureB]);
+  assert.equal(plan.jobs[0].outputDir, plan.jobs[1].outputDir);
+  assert.notEqual(plan.jobs[0].outputDir, plan.jobs[2].outputDir);
+});
+
+test('批量导出只验证本次生成的主产物，CLI 成功但没有新主产物时报告失败', async (t) => {
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spine-p11-outputs-'));
+  t.after(() => fs.rmSync(outputDir, { recursive: true, force: true }));
+  const old = path.join(outputDir, 'old.json');
+  fs.writeFileSync(old, 'old');
+  const options = { projectPath: fixtureA, outputDir, verify: true };
+  const cliSuccess = { success: true, exitCode: 0 };
+  const noOutputs = await runExportWorkflow(options, {
+    runSpineCli: () => cliSuccess,
+    verifyFiles: () => assert.fail('缺少主产物时不能继续校验'),
+  });
+  assert.equal(noOutputs.success, false);
+  assert.equal(noOutputs.runs[0].fileCount, 0);
+  assert.match(noOutputs.error, /未生成本次 json 主产物/);
+
+  const verified = await runExportWorkflow({ ...options, formats: ['json', 'binary'] }, {
+    runSpineCli: (args) => {
+      const settings = JSON.parse(fs.readFileSync(args[args.indexOf('-e') + 1], 'utf8'));
+      const name = settings.class === 'export-json' ? 'hero.json' : 'hero.skel';
+      fs.writeFileSync(path.join(outputDir, name), 'new');
+      return cliSuccess;
+    },
+    verifyFiles: (request, files) => {
+      assert.equal(request.projectPath, fixtureA);
+      assert.equal(request.exportDir, outputDir);
+      assert.deepEqual(files, ['hero.json', 'hero.skel']);
+      return { ok: true, checkedFiles: files };
+    },
+  });
+  assert.equal(verified.success, true);
+  assert.deepEqual(verified.verification.checkedFiles, ['hero.json', 'hero.skel']);
+  assert.equal(verified.report.primaryFiles, 2);
+});
+
 test('mergeRunFiles：同目录多 job 的产物按路径去重，主产物标记取并集', () => {
   const merged = mergeRunFiles([
     {

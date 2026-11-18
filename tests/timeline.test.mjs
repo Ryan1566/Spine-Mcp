@@ -66,6 +66,7 @@ test('在副本上生成普攻动画，源文件对象不被修改', () => {
   assert.equal(source.animations.attack_01, undefined, '源对象不得被修改');
   assert.equal(source.events.recover, undefined, '源事件表不得被修改');
   assert.equal(summary.durationSec, 0.666667);
+  assert.equal(summary.timelineEndSec, 0.583333);
   assert.equal(summary.boneCount, 2);
   assert.equal(summary.eventCount, 2);
 
@@ -113,7 +114,7 @@ test('校验器能发现缺失的事件定义与倒序时间', () => {
   assert.ok(report.errors.some((e) => e.includes('缺少定义')));
 });
 
-test('校验器支持 3.8 导出的对象式 events', () => {
+test('校验器兼容对象式 events', () => {
   const json = loadFixture();
   json.events ??= {};
   json.events.step = {};
@@ -125,6 +126,26 @@ test('校验器支持 3.8 导出的对象式 events', () => {
   assert.equal(report.valid, true);
   assert.equal(report.stats.eventCount, 2);
   assert.equal(report.stats.maxTimeSec, 0.75);
+});
+
+test('构建器排序插槽换图，并在校验中计入非骨骼轨道结尾', () => {
+  const spec = {
+    fps: 10, frames: 8, animationName: 'swap',
+    slotKeys: [{ slot: 'eye', frame: 7 }, { slot: 'eye', frame: 1, attachment: 'eye_closed' }],
+  };
+  const { json, summary } = buildCombatAnimation(loadFixture(), spec);
+  assert.deepEqual(json.animations.swap.slots.eye.attachment, [
+    { time: 0, name: 'eye_closed' }, { time: 0.6, name: null },
+  ]);
+  assert.equal(summary.timelineEndSec, 0.6);
+  assert.throws(() => buildCombatAnimation(loadFixture(), {
+    ...spec, slotKeys: [spec.slotKeys[0], spec.slotKeys[0]],
+  }), /slots.eye.attachment.*未严格递增/);
+
+  json.animations.swap.drawOrder = [{ time: 0.8 }, { time: 'invalid' }];
+  const report = validateAnimation(json, 'swap');
+  assert.equal(report.valid, false);
+  assert.equal(report.stats.maxTimeSec, 0.8);
 });
 
 // 3.8 的贝塞尔不是数组：curve=cx1 + 同级 c2/c3/c4。传数组必须被翻译，否则 Spine 直接报

@@ -7,6 +7,7 @@ import {
   exportArgs,
   importArgs,
   isSpineConfigured,
+  replaceProjectFromImport,
   resolveSpineExe,
   runSpine,
   SPINE_TARGET_VERSION,
@@ -205,7 +206,7 @@ export const TOOLS = [
   },
   {
     name: 'spine_validate_timeline',
-    description: '静态校验生成动画的时间轴：时间递增、骨骼存在、事件定义齐全。不调用 Spine。',
+    description: '静态校验 Spine 时间轴：检查关键帧时间、骨骼与插槽引用、事件定义。允许同一时刻有多个事件。不调用 Spine。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -261,7 +262,7 @@ export const TOOLS = [
           description: '默认 false。true = 原地替换整个工程（不是追加骨架）：结果工程里只有导入的这一份骨架，JSON 里同名的旧骨架不保留。实测限制：CLI 导入不写骨架画布尺寸，替换后 Size 会变成 unknown（GUI 的 File→Import Data 才会保留），其余骨骼/槽位/皮肤/事件/约束/动画/图片路径都能过。',
         },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
-        backup: { type: 'boolean', description: 'overwrite:true 时写前备份目标工程到系统临时目录，默认 true' },
+        backup: { type: 'boolean', description: 'replaceProject:true 或 overwrite:true 时写前备份目标工程到系统临时目录，默认 true' },
       },
       required: ['inputPath', 'outputPath'],
       additionalProperties: false,
@@ -952,7 +953,11 @@ function summarizeSkeleton(skeleton, jsonPath) {
 
 // 会写 .spine 的操作统一附带人工重载提示；只在成功时加，失败不误导。
 export function withReloadHint(result) {
-  return result?.success ? { ...result, requiresManualReload: true, reloadHint: RELOAD_HINT } : result;
+  if (!result?.success) return result;
+  const reloadHint = result.replaced
+    ? '替换已落盘。请重新打开工程的磁盘版本；重载前避免保存内存中的旧版本。'
+    : RELOAD_HINT;
+  return { ...result, requiresManualReload: true, reloadHint };
 }
 
 // 写前备份的路径随结果返回，方便用户恢复；没备份就不加字段。
@@ -1165,6 +1170,7 @@ export async function callTool(name, args = {}) {
       });
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1209,54 +1215,16 @@ export async function callTool(name, args = {}) {
     }
 
     case 'spine_import_json': {
-      // 任何写盘操作之前先确认 GUI 当前打开的是哪个工程：
-      // 判据是窗口标题，不是文件 mtime（打开工程不写盘，mtime 会骗人）。
-      const gui = inspectGuiProject({ projectPath: args.outputPath });
-      const attachGui = (r) => ({ ...r, gui });
-      const replaceProject = args.replaceProject === true;
-      // replaceProject：CLI 只认「导入到已有工程 → 追加骨架」，不能替换同名骨架。
-      // 所以先把结果生成到同目录临时文件，成功后再整体换掉目标，等价于「原地重生」。
-      let staging = null;
-      let cliOutput = args.outputPath;
-      if (replaceProject) {
-        try {
-          await fs.access(args.outputPath);
-        } catch {
-          throw new Error('replaceProject:true 时 outputPath 必须是已存在的工程（要替换的就是它）；新建工程请用 replaceProject:false');
-        }
-        // 临时文件必须保留 .spine 扩展名，否则 CLI 会拒绝写入
-        const base = path.basename(args.outputPath, path.extname(args.outputPath));
-        staging = path.join(path.dirname(args.outputPath), `${base}.importing.spine`);
-        await fs.rm(staging, { force: true });
-        cliOutput = staging;
+      if (args.replaceProject === true) {
+        const { backupPath, ...result } = await replaceProjectFromImport(args);
+        return withBackup(withReloadHint(result), backupPath);
       }
-      const cliArgs = importArgs({
-        inputPath: args.inputPath,
-        outputPath: cliOutput,
-        scale: args.scale,
-        skeletonName: args.skeletonName,
-      });
-      if (!replaceProject) assertWritableOutput(args.outputPath, 'outputPath', args.overwrite === true);
+      const gui = inspectGuiProject({ projectPath: args.outputPath });
+      const cliArgs = importArgs(args);
+      assertWritableOutput(args.outputPath, 'outputPath', args.overwrite === true);
       const backupPath = backupIfExists(args.outputPath, args.overwrite === true && args.backup !== false);
       const result = await runSpine(cliArgs);
-      if (!replaceProject) return withBackup(withReloadHint(attachGui(result)), backupPath);
-      if (result.success === false) {
-        await fs.rm(staging, { force: true });
-        return withBackup({ ...result, replaceProject: true, replaced: false, gui, note: 'CLI 导入失败，目标工程未改动；临时文件已清理。' }, backupPath);
-      }
-      await fs.rm(args.outputPath, { force: true });
-      await fs.rename(staging, args.outputPath);
-      return withBackup(
-        withReloadHint({
-          ...result,
-          replaceProject: true,
-          replaced: true,
-          replacedPath: args.outputPath,
-          gui,
-          note: '已用导入结果整体替换目标工程（旧骨架不保留，只有导入的这一份）。CLI 导入不写骨架画布尺寸，Size 会变成 unknown；需要的话在 GUI 里设一次 Skeleton Size。',
-        }),
-        backupPath,
-      );
+      return withBackup(withReloadHint({ ...result, gui }), backupPath);
     }
 
     case 'spine_clean': {
@@ -1352,6 +1320,7 @@ export async function callTool(name, args = {}) {
       });
       const written = await writeJsonCopy({
         sourceSkeleton: base,
+        sourcePaths: [args.baseJsonPath, args.donorJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1374,6 +1343,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1406,6 +1376,7 @@ export async function callTool(name, args = {}) {
         const out = path.join(args.outputDir, `${item.name}.${args.animationName}.json`);
         const result = await writeJsonCopy({
           sourceSkeleton: item.skeleton,
+          sourcePaths: paths,
           outputJsonPath: out,
           json: item.json,
           overwrite: args.overwrite === true,
@@ -1433,6 +1404,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1454,6 +1426,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 inspect 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1492,6 +1465,7 @@ export async function callTool(name, args = {}) {
       });
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1516,6 +1490,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1539,6 +1514,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json,
         overwrite: args.overwrite === true,
@@ -1568,6 +1544,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('非 list 模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json: result.json,
         overwrite: args.overwrite === true,
@@ -1603,6 +1580,7 @@ export async function callTool(name, args = {}) {
       if (!args.outputJsonPath) throw new Error('写入模式必须提供 outputJsonPath');
       const written = await writeJsonCopy({
         sourceSkeleton: skeleton,
+        sourcePaths: [args.sourceJsonPath],
         outputJsonPath: args.outputJsonPath,
         json: result.json,
         overwrite: args.overwrite === true,

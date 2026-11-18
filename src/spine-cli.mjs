@@ -1,8 +1,11 @@
 // 只通过官方 Spine CLI 操作 .spine 工程。
 // 3.8.75 关键约束：导出必须用 -e <export-settings.json>，且该文件必须真实存在。
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { backupFile } from './backup.mjs';
+import { inspectGuiProject } from './gui-status.mjs';
 
 export const SPINE_TARGET_VERSION = '3.8.75';
 
@@ -134,6 +137,58 @@ export function importArgs({ inputPath, outputPath, scale, skeletonName }) {
     args.push(skeletonName);
   }
   return args;
+}
+
+export async function replaceProjectFromImport(options, { run = runSpine, inspectGui = inspectGuiProject } = {}) {
+  const { outputPath } = options;
+  assertSafePath(outputPath, 'outputPath');
+  const target = path.resolve(outputPath);
+  if (path.extname(target).toLowerCase() !== '.spine') throw new Error('outputPath 必须是 .spine 工程路径');
+  const before = fs.statSync(target, { bigint: true, throwIfNoEntry: false });
+  if (!before?.isFile()) {
+    throw new Error('replaceProject:true 时 outputPath 必须是已存在的工程（要替换的就是它）；新建工程请用 replaceProject:false');
+  }
+  const assertCurrentProject = () => {
+    const gui = inspectGui({ projectPath: outputPath });
+    if (gui.matchesCurrent !== true || gui.dirty !== false) {
+      throw new Error('替换工程要求 Spine GUI 已打开对应工程且已保存改动；请检查 spine_gui_status');
+    }
+    return gui;
+  };
+  const gui = assertCurrentProject();
+  const staging = path.join(path.dirname(target), `.spine-import-${randomUUID()}.spine`);
+  const cliArgs = importArgs({ ...options, outputPath: staging });
+  try {
+    const result = await run(cliArgs);
+    const imported = fs.statSync(staging, { throwIfNoEntry: false });
+    if (!result.success || !imported?.isFile() || imported.size === 0) {
+      return {
+        ...result, success: false, replaceProject: true, replaced: false, gui,
+        error: result.error ?? (result.success ? 'Spine CLI 未生成有效的临时工程' : null),
+        note: 'CLI 未生成有效的临时 .spine 文件，目标工程未改动。',
+      };
+    }
+    const currentGui = assertCurrentProject();
+    // CLI 运行期间，编辑器或另一个请求可能已经保存了新版本。
+    const current = fs.statSync(target, { bigint: true, throwIfNoEntry: false });
+    if (!current || ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].some((key) => current[key] !== before[key])) {
+      throw new Error('导入期间目标工程已变化，本次替换已中止');
+    }
+    const backupPath = options.backup === false ? null : backupFile(target);
+    try {
+      // 同目录 rename 直接替换，即使重命名失败也不会先删除原件。
+      fs.renameSync(staging, target);
+    } catch (error) {
+      throw new Error(`无法替换工程: ${error.message}${backupPath ? `（备份: ${backupPath}）` : ''}`, { cause: error });
+    }
+    return {
+      ...result, replaceProject: true, replaced: true, replacedPath: outputPath,
+      gui: currentGui, backupPath,
+      note: '已整体替换工程，只保留导入的骨架。CLI 导入不写骨架画布尺寸；需要时在 GUI 中设置 Skeleton Size。',
+    };
+  } finally {
+    fs.rmSync(staging, { force: true });
+  }
 }
 
 // 3.8.75 清理：Spine -i <in.spine> -m

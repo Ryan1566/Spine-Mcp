@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { auditProject } from '../src/project-audit.mjs';
 import { inspectAnimation, editAnimation } from '../src/animation-detail.mjs';
-import { mergeAnimations } from '../src/animation-ops.mjs';
+import { diffAnimations, manageEvents, mergeAnimations } from '../src/animation-ops.mjs';
 import { TOOLS } from '../src/tools.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -143,6 +143,44 @@ test('mergeAnimations：boneMap / timeOffset / skipMissingBones', () => {
   assert.equal(animation.events[0].time, 0.75);
   assert.deepEqual(merged.summary.remappedBones, [{ animation: 'attack', from: 'donor_head', to: 'head' }]);
   assert.deepEqual(merged.summary.droppedBoneTracks, [{ animation: 'attack', bone: 'ghost' }]);
+});
+
+test('事件读取、体检、重命名和变速兼容数组与对象，同一时刻可有多个事件', () => {
+  const source = hero();
+  source.events = { hit: {}, effect: {} };
+  const idle = source.animations.idle;
+  idle.bones.head.rotate[0].curve = 0.25;
+  idle.events = [{ name: 'hit', time: 0.5 }, { name: 'effect', time: 0.5 }];
+  assert.equal(auditProject(source).ok, true);
+  const shifted = editAnimation(source, { mode: 'shift', animationName: 'idle', offset: 0.25 });
+  assert.deepEqual(shifted.json.animations.idle.events.map((key) => key.time), [0.75, 0.75]);
+
+  idle.events = { hit: [{ time: 0.5 }, { time: 0.5, int: 2 }], effect: { time: 1.5 } };
+  assert.equal(auditProject(source).ok, true);
+  const inspected = inspectAnimation(source, 'idle');
+  assert.equal(inspected.durationSec, 1.5);
+  assert.equal(inspected.counts.events, 3);
+  assert.ok(inspected.curveTypes.includes('bezier'));
+  assert.equal(diffAnimations(hero(), source).changed[0].after.events, 3);
+  assert.deepEqual(manageEvents(source).events[0].usedBy, ['idle']);
+  const renamed = manageEvents(source, { mode: 'rename', rename: { from: 'effect', to: 'shine' } });
+  assert.deepEqual(renamed.json.animations.idle.events.shine, { time: 1.5 });
+  assert.equal(renamed.json.animations.idle.events.effect, undefined);
+  const scaled = editAnimation(renamed.json, { mode: 'scale', animationName: 'idle', scale: 2 });
+  assert.deepEqual(scaled.json.animations.idle.events.shine, { time: 3 });
+  assert.equal(scaled.summary.durationSec, 3);
+});
+
+test('合并对象式事件并平移时间时只改关键帧，保留 drawOrder 的偏移数据', () => {
+  const donor = hero();
+  donor.events = { sparkle: { int: 3 } };
+  donor.animations.idle.events = { sparkle: { time: 2 } };
+  donor.animations.idle.drawOrder = [{ offsets: [{ slot: 'eye', offset: 1 }] }];
+  const merged = mergeAnimations(hero(), donor, { overwrite: true, timeOffset: 0.25 });
+  const idle = merged.json.animations.idle;
+  assert.deepEqual(idle.events.sparkle, { time: 2.25 });
+  assert.deepEqual(idle.drawOrder, [{ time: 0.25, offsets: [{ slot: 'eye', offset: 1 }] }]);
+  assert.deepEqual(merged.json.events.sparkle, { int: 3 });
 });
 
 test('stdio 集成：P5 三个工具与增强合并可用', async () => {

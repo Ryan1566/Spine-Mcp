@@ -168,3 +168,24 @@ test('stdio 集成：dryRun 不落盘，workflow 计划与备份清单可用', a
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('通过 MCP 写 JSON 副本时，overwrite 不会覆盖同路径的输入', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spine-p7-source-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const input = path.join(dir, 'hero.json');
+  const original = fs.readFileSync(heroPath);
+  fs.writeFileSync(input, original);
+  const [response] = await runServer([{
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: {
+      name: 'spine_edit_animation',
+      arguments: {
+        sourceJsonPath: input, outputJsonPath: path.join(dir, '.', 'hero.json'),
+        animationName: 'idle', newName: 'idle_copy', mode: 'duplicate', overwrite: true,
+      },
+    },
+  }]);
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.structuredContent.error, /指向输入 JSON/);
+  assert.deepEqual(fs.readFileSync(input), original);
+});

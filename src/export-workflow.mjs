@@ -6,8 +6,7 @@ import path from 'node:path';
 import { assertSafePath, exportArgs, runSpine } from './spine-cli.mjs';
 import { assertDirectory, packArgs } from './atlas.mjs';
 import { buildExportSettings, DATA_FORMATS } from './export-settings.mjs';
-import { projectInfo } from './project-info.mjs';
-import { compareExportSkeletons } from './verify-export.mjs';
+import { verifyExport } from './verify-export.mjs';
 
 // 每个数据格式的产物扩展名，用于把文件归到具体 job。
 const DATA_EXTENSION = { json: '.json', binary: '.skel' };
@@ -79,7 +78,7 @@ export function buildExportWorkflowPlan({
     assertSafePath(item, projectList.length > 1 ? `projects[${index}]` : 'projectPath', { mustExist: true });
   }
   // 同一工程传两次没有意义，按首次出现去重，避免产物被重复覆盖。
-  const uniqueProjects = [...new Set(projectList)];
+  const matrixProjects = [...new Set(projectList)];
 
   const formatList = normalizeList(formats, 'formats');
   const effectiveFormats = formatList.length > 0 ? [...new Set(formatList)] : [format];
@@ -91,13 +90,12 @@ export function buildExportWorkflowPlan({
   if (!Array.isArray(extraInputs)) throw new Error('extraInputs 必须是数组');
 
   const jobs = [];
-  for (const [projectIndex, inputPath] of uniqueProjects.entries()) {
+  for (const inputPath of matrixProjects) {
     for (const item of effectiveFormats) {
       jobs.push({
         name: jobName(inputPath, item, jobs.length),
         inputPath,
         format: item,
-        projectIndex,
         exportSettingsPath: null,
         settingsSource: 'generated',
       });
@@ -114,7 +112,6 @@ export function buildExportWorkflowPlan({
       name: jobName(item.inputPath, jobFormat, jobs.length),
       inputPath: item.inputPath,
       format: jobFormat,
-      projectIndex: uniqueProjects.indexOf(item.inputPath),
       exportSettingsPath: item.exportSettingsPath ?? null,
       settingsSource: item.exportSettingsPath ? 'provided' : 'generated',
     });
@@ -129,14 +126,15 @@ export function buildExportWorkflowPlan({
   }
 
   // 单个工程时沿用原来的「产物直接落在 outputDir」，多工程时按工程分子目录，避免同名 skeleton 互相覆盖。
+  const uniqueProjects = [...new Set(jobs.map((job) => job.inputPath))];
   const multiProject = uniqueProjects.length > 1;
   const projectDirs = uniqueProjects.map((inputPath, index) => ({
     inputPath,
     dir: multiProject ? path.join(outputDir, projectDirName(index, inputPath)) : outputDir,
   }));
   for (const job of jobs) {
-    const matched = projectDirs.find((item) => item.inputPath === job.inputPath);
-    job.outputDir = matched?.dir ?? outputDir;
+    job.projectIndex = uniqueProjects.indexOf(job.inputPath);
+    job.outputDir = projectDirs[job.projectIndex].dir;
   }
 
   const plan = {
@@ -178,50 +176,34 @@ export function failureHint(stdout, stderr) {
   return chosen ? chosen.slice(0, 300) : null;
 }
 
-// 只认本次 job 期间新写出的产物，避免把上一次的文件算进来。
-// primary=true 表示与该 job 的格式对应的主产物；atlas / png 这类是同目录附带产物。
-async function collectJobOutputs(dir, format, startedAt, toleranceMs = 3000) {
-  const extension = DATA_EXTENSION[format];
-  if (!extension) throw new Error(`不支持的产物格式: ${format}`);
-  const threshold = startedAt - toleranceMs;
-  let entries = [];
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const files = [];
+// 对照每个 job 前后的文件状态；刚生成的旧文件也不能计入本次产物。
+async function snapshotJobDirectory(dir) {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files = new Map();
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const full = path.join(dir, entry.name);
-    const stat = await statOrNull(full);
-    if (!stat || stat.size === 0 || stat.mtimeMs < threshold) continue;
-    files.push({
+    const stat = await fs.stat(full, { bigint: true }).catch((error) => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    });
+    if (!stat?.isFile() || stat.size === 0n) continue;
+    files.set(entry.name, {
       path: full,
       name: entry.name,
-      sizeBytes: stat.size,
-      primary: entry.name.toLowerCase().endsWith(extension),
+      sizeBytes: Number(stat.size),
+      stamp: [stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':'),
     });
   }
-  return files.sort((a, b) => a.name.localeCompare(b.name));
+  return files;
 }
 
-async function verifyDir(projectPath, dir) {
-  const source = await projectInfo(projectPath);
-  if (!source.success || !source.parsed) throw new Error(`无法读取源工程信息: ${projectPath}`);
-  const files = (await fs.readdir(dir))
-    .filter((file) => file.toLowerCase().endsWith('.json') || file.toLowerCase().endsWith('.skel'))
-    .sort();
-  const items = [];
-  for (const file of files) {
-    const result = await projectInfo(path.join(dir, file));
-    items.push({ file, parsed: result.parsed, exitCode: result.exitCode });
-  }
-  return {
-    sourceSkeletons: source.parsed.skeletons.map((s) => s.name),
-    checkedFiles: files,
-    ...compareExportSkeletons(source.parsed, items),
-  };
+async function collectJobOutputs(dir, format, before) {
+  const after = await snapshotJobDirectory(dir);
+  return [...after.values()]
+    .filter((file) => before.get(file.name)?.stamp !== file.stamp)
+    .map(({ stamp, ...file }) => ({ ...file, primary: file.name.toLowerCase().endsWith(DATA_EXTENSION[format]) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // 同一目录里 json / binary 两个 job 会看到同一批 atlas / png，按路径去重；
@@ -287,7 +269,7 @@ async function runPackStage(plan, excludePaths = new Set()) {
   };
 }
 
-export async function runExportWorkflow(options = {}) {
+export async function runExportWorkflow(options = {}, { runSpineCli = runSpine, verifyFiles = verifyExport } = {}) {
   const plan = buildExportWorkflowPlan(options);
   if (plan.dryRun) return plan;
   const { prettyPrint, nonessential } = plan.settingsOptions;
@@ -314,7 +296,7 @@ export async function runExportWorkflow(options = {}) {
     const runs = [];
     for (const job of plan.jobs) {
       await fs.mkdir(job.outputDir, { recursive: true });
-      const startedAt = Date.now();
+      const before = await snapshotJobDirectory(job.outputDir);
       const args = exportArgs({
         inputPath: job.inputPath,
         outputDir: job.outputDir,
@@ -322,22 +304,26 @@ export async function runExportWorkflow(options = {}) {
         clean: false,
         extraInputs: [],
       });
-      const result = await runSpine(args);
-      const files = result.success ? await collectJobOutputs(job.outputDir, job.format, startedAt) : [];
+      const result = await runSpineCli(args);
+      const files = result.success ? await collectJobOutputs(job.outputDir, job.format, before) : [];
+      const fileCount = files.filter((file) => file.primary).length;
+      const success = result.success && fileCount > 0;
       runs.push({
         job: job.name,
         inputPath: job.inputPath,
         format: job.format,
         outputDir: job.outputDir,
         exitCode: result.exitCode,
-        success: result.success,
-        error: result.error ?? (result.success ? null : failureHint(result.stdout, result.stderr)),
+        success,
+        error: result.success
+          ? (success ? null : `Spine CLI 未生成本次 ${job.format} 主产物`)
+          : (result.error ?? failureHint(result.stdout, result.stderr)),
         command: result.command,
         args,
         stdout: result.stdout,
         stderr: result.stderr,
         files,
-        fileCount: files.filter((file) => file.primary).length,
+        fileCount,
         byproductCount: files.filter((file) => !file.primary).length,
         totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
       });
@@ -354,7 +340,7 @@ export async function runExportWorkflow(options = {}) {
       ...plan,
       command: runs[0]?.command ?? null,
       args: runs[0]?.args ?? [],
-      exitCode: success ? 0 : (firstFailure?.exitCode ?? packResult?.exitCode ?? -1),
+      exitCode: success ? 0 : (firstFailure?.exitCode || packResult?.exitCode || -1),
       success,
       stdout: [...runs.map((run) => run.stdout), packResult?.stdout ?? ''].join('').slice(0, 20000),
       stderr: [...runs.map((run) => run.stderr), packResult?.stderr ?? ''].join('').slice(0, 20000),
@@ -400,17 +386,19 @@ export async function runExportWorkflow(options = {}) {
     };
 
     if (dataSuccess && plan.verify) {
-      // 同一目录里可能有多份产物（一个工程的 json + binary），按目录去重后再校验。
+      // 一个工程可能导出多种格式，只校验本次各 job 确认写入的主产物。
       const verifications = [];
-      const seen = new Set();
+      const byDir = new Map();
       for (const run of runs) {
-        if (seen.has(run.outputDir)) continue;
-        seen.add(run.outputDir);
+        const group = byDir.get(run.outputDir) ?? { projectPath: run.inputPath, files: new Set() };
+        for (const file of run.files) if (file.primary) group.files.add(file.name);
+        byDir.set(run.outputDir, group);
+      }
+      for (const [outputDir, { projectPath, files }] of byDir) {
         try {
-          verifications.push({ outputDir: run.outputDir, ...(await verifyDir(run.inputPath, run.outputDir)) });
+          verifications.push({ outputDir, ...(await verifyFiles({ projectPath, exportDir: outputDir }, [...files])) });
         } catch (error) {
-          // 导出已经成功，校验失败不能反过来把整个工作流标成失败。
-          verifications.push({ outputDir: run.outputDir, ok: false, checked: false, error: error.message });
+          verifications.push({ outputDir, ok: false, checked: false, error: error.message });
         }
       }
       response.verification = verifications.length === 1
