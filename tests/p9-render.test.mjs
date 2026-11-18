@@ -51,7 +51,7 @@ test('buildExportSettings：渲染格式的 class / exportType / 扩展名映射
     ['png', 'export-png', 'image', '.png'],
     ['mov', 'export-mov', 'video', '.mov'],
     ['avi', 'export-avi', 'video', '.avi'],
-    ['gif', 'export-gif', 'video', '.gif'],
+    ['gif', 'export-gif', 'animation', '.gif'],
   ];
   for (const [format, className, exportType, extension] of cases) {
     const settings = buildExportSettings({ format });
@@ -84,6 +84,16 @@ test('buildExportSettings：动画范围 / 逐帧 / msaa 参数校验', () => {
   assert.throws(() => buildExportSettings({ format: 'png', lastFrame: 'yes' }), /lastFrame 必须是布尔值/);
   assert.equal(buildExportSettings({ format: 'png', msaa: 4 }).msaa, 4);
   assert.throws(() => buildExportSettings({ format: 'png', msaa: 2.5 }), /msaa 必须是非负整数/);
+  const gif = buildExportSettings({ format: 'gif', animation: '普攻', skeleton: 'hero', skin: 'base', fps: 30 });
+  assert.equal(gif.animationType, 'single');
+  assert.equal(gif.animation, '普攻');
+  assert.equal(gif.skeletonType, 'single');
+  assert.equal(gif.skinType, 'single');
+  assert.equal(gif.fps, 30);
+  assert.equal(gif.renderImages, true);
+  assert.deepEqual([gif.rangeStart, gif.rangeEnd], [-1, -1]);
+  assert.throws(() => buildExportSettings({ format: 'gif', animation: 'attack', animationType: 'all' }), /必须为 single/);
+  assert.throws(() => buildExportSettings({ format: 'gif', fps: 60 }), /1 到 50/);
 });
 
 test('parseColor：十六进制转 CLI 要求的 {r,g,b,a}', () => {
@@ -118,7 +128,7 @@ test('makeExportSettings：渲染设置落盘、覆盖保护与 readExportClass'
     assert.equal(await readExportClass(target), 'export-gif');
     const settings = JSON.parse(fs.readFileSync(target, 'utf8'));
     assert.equal(settings.class, 'export-gif');
-    assert.equal(settings.exportType, 'video');
+    assert.equal(settings.exportType, 'animation');
 
     const png = path.join(dir, 'png.json');
     const pngResult = await makeExportSettings({ outputPath: png, format: 'png', animationType: 'all' });

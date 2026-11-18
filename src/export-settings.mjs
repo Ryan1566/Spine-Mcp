@@ -30,6 +30,7 @@ const FORMAT_BY_RENDER_CLASS = {
 };
 
 export const ANIMATION_TYPES = ['all', 'single', 'current'];
+export const DEFAULT_GIF_FPS = 20;
 
 export function isRenderFormat(format) {
   return RENDER_FORMATS.includes(format);
@@ -66,12 +67,39 @@ export function parseColor(value, label = 'backgroundColor') {
   };
 }
 
-function buildRenderSettings({ format, animationType, lastFrame, msaa, backgroundColor }) {
+function buildRenderSettings({ format, animationType, animation, skeleton, skin, fps, lastFrame, msaa, backgroundColor }) {
   const settings = {
     class: CLASS_BY_FORMAT[format],
-    // 实测 export-png 用 image，mov / avi / gif 用 video。
-    exportType: format === 'png' ? 'image' : 'video',
+    exportType: format === 'gif' ? 'animation' : format === 'png' ? 'image' : 'video',
   };
+  for (const [key, value] of Object.entries({ animation, skeleton, skin })) {
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} 必须是非空名称`);
+    settings[key] = value;
+  }
+  if (animation !== undefined) {
+    if (animationType !== undefined && animationType !== 'single') {
+      throw new Error('指定 animation 时，animationType 必须为 single');
+    }
+    animationType = 'single';
+  }
+  if (skeleton !== undefined) settings.skeletonType = 'single';
+  if (skin !== undefined) settings.skinType = 'single';
+  if (format === 'gif') {
+    animationType ??= 'all';
+    fps ??= DEFAULT_GIF_FPS;
+    settings.skinType ??= 'all';
+    Object.assign(settings, {
+      renderImages: true, maxBounds: true, rangeStart: -1, rangeEnd: -1,
+      outputType: 'singleFile', colors: 256, colorDither: 50, alphaThreshold: 8, alphaDither: 40,
+    });
+  }
+  if (fps !== undefined) {
+    if (!Number.isInteger(fps) || fps < 1 || (format === 'gif' && fps > 50)) {
+      throw new Error(format === 'gif' ? 'GIF fps 必须是 1 到 50 的整数' : 'fps 必须是正整数');
+    }
+    settings.fps = fps;
+  }
   if (animationType !== undefined) {
     if (!ANIMATION_TYPES.includes(animationType)) {
       throw new Error(`animationType 只支持 ${ANIMATION_TYPES.join('/')}，收到: ${animationType}`);
@@ -101,6 +129,10 @@ export function buildExportSettings({
   nonessential = true,
   cleanUp = false,
   animationType,
+  animation,
+  skeleton,
+  skin,
+  fps,
   lastFrame,
   msaa,
   backgroundColor,
@@ -109,7 +141,7 @@ export function buildExportSettings({
     throw new Error(`不支持的导出格式 '${format}'；可选 ${SUPPORTED_FORMATS.join('/')}`);
   }
   if (isRenderFormat(format)) {
-    return buildRenderSettings({ format, animationType, lastFrame, msaa, backgroundColor });
+    return buildRenderSettings({ format, animationType, animation, skeleton, skin, fps, lastFrame, msaa, backgroundColor });
   }
   return {
     class: CLASS_BY_FORMAT[format],
@@ -153,13 +185,16 @@ export async function makeExportSettings({ outputPath, overwrite = false, format
 }
 
 // 读取设置文件的 class，用于判断这次导出属于数据导出还是渲染导出。
-export async function readExportClass(settingsPath) {
+export async function readExportSettings(settingsPath) {
   const text = await fs.readFile(settingsPath, 'utf8');
-  let parsed;
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text);
   } catch (error) {
     throw new Error(`导出设置不是合法 JSON: ${settingsPath}（${error.message}）`);
   }
-  return typeof parsed?.class === 'string' ? parsed.class : null;
+}
+
+export async function readExportClass(settingsPath) {
+  const settings = await readExportSettings(settingsPath);
+  return typeof settings?.class === 'string' ? settings.class : null;
 }

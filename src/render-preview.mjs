@@ -8,6 +8,7 @@ import { assertSafePath, runSpine } from './spine-cli.mjs';
 import { buildExportSettings, isRenderFormat, outputPathKind, RENDER_FORMATS } from './export-settings.mjs';
 import { collectRenderOutputs } from './render-outputs.mjs';
 import { failureHint } from './export-workflow.mjs';
+import { renderGif } from './render-gif.mjs';
 
 const DEFAULT_TIMEOUT = 600000;
 
@@ -20,7 +21,11 @@ export async function renderPreview({
   projectPath,
   outputDir,
   format = 'png',
-  animationType = 'all',
+  animation,
+  animationType = animation === undefined ? 'all' : 'single',
+  skeleton,
+  skin,
+  fps,
   lastFrame,
   msaa,
   backgroundColor,
@@ -31,6 +36,7 @@ export async function renderPreview({
   assertSafePath(outputDir, 'outputDir', {});
   if (!isRenderFormat(format)) throw new Error(`format 只支持 ${RENDER_FORMATS.join('/')}，收到 ${format}`);
 
+  const settings = buildExportSettings({ format, animationType, animation, skeleton, skin, fps, lastFrame, msaa, backgroundColor });
   const outputBase = previewOutputBase(projectPath, outputDir, format, animationType);
   const plan = {
     strategy: 'render-preview',
@@ -38,12 +44,26 @@ export async function renderPreview({
     outputDir,
     format,
     animationType,
+    ...(animation === undefined ? {} : { animation }),
+    ...(skeleton === undefined ? {} : { skeleton }),
+    ...(skin === undefined ? {} : { skin }),
+    ...(settings.fps === undefined ? {} : { fps: settings.fps }),
     outputPath: outputBase,
     outputKind: outputPathKind(format, animationType),
     dryRun,
-    note: '渲染导出的 -o 是文件基名；png + animationType=all 时当目录。设置文件由本工具临时生成并在结束后删除。',
+    note: format === 'gif'
+      ? '使用 Spine 渲染完整 PNG 序列，再按帧时长编码 GIF。每个动画和皮肤组合单独生成 GIF。'
+      : '渲染导出的 -o 是文件基名；png + animationType=all 时当目录。设置文件由本工具临时生成并在结束后删除。',
   };
   if (dryRun) return { ...plan, success: false, exitCode: null, count: 0, outputs: [] };
+  if (format === 'gif') {
+    const { command, args, stdout, stderr, ...result } = await renderGif({ projectPath, outputPath: outputBase, settings, timeoutMs });
+    return {
+      ...plan, ...result,
+      previewFiles: result.outputs.slice(0, 20).map(({ path }) => path),
+      ...(result.count > 20 ? { previewFilesTruncated: true } : {}),
+    };
+  }
 
   let stat = null;
   try {
@@ -54,7 +74,6 @@ export async function renderPreview({
   if (stat && !stat.isDirectory()) throw new Error(`outputDir 已存在但不是目录: ${outputDir}`);
   await fs.mkdir(outputDir, { recursive: true });
 
-  const settings = buildExportSettings({ format, animationType, lastFrame, msaa, backgroundColor });
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spine-preview-'));
   const settingsPath = path.join(tmpDir, 'preview.json');
   const startedAt = Date.now();

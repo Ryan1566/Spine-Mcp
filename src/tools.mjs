@@ -20,13 +20,14 @@ import {
 import { requestGuiReload, RELOAD_HINT } from './gui-link.mjs';
 import { inspectGuiProject } from './gui-status.mjs';
 import { projectInfo } from './project-info.mjs';
-import { makeExportSettings, readExportClass, isRenderClass, formatForRenderClass } from './export-settings.mjs';
+import { makeExportSettings, readExportSettings, isRenderClass, formatForRenderClass } from './export-settings.mjs';
 import { collectRenderOutputs } from './render-outputs.mjs';
 import { backupIfExists, listBackups } from './backup.mjs';
 import { verifyExport } from './verify-export.mjs';
 import { parseSkelFile } from './skel-parse.mjs';
 import { inspectMesh, DETAILS } from './mesh-inspect.mjs';
 import { renderPreview } from './render-preview.mjs';
+import { renderGif } from './render-gif.mjs';
 import { evaluateScene, listAnimations, atlasFromReport } from './pose-eval.mjs';
 import { sceneToSvg, sceneToHtml } from './wireframe.mjs';
 import { readPng } from './png-read.mjs';
@@ -49,6 +50,12 @@ import { runExportWorkflow } from './export-workflow.mjs';
 const NEXT_STEP_IMPORT = '若要在 Spine 编辑器里查看，请手动 File → Import Data 导入这个 JSON 副本（不自动重载工程）。';
 
 const frameRef = { type: 'integer', minimum: 1, description: '1-based 帧号' };
+const renderSelection = {
+  animation: { type: 'string', description: '指定动画名称；同时将 animationType 设为 single' },
+  skeleton: { type: 'string', description: '可选，指定骨架名称' },
+  skin: { type: 'string', description: '可选，指定皮肤名称；GIF 未指定时导出可用皮肤' },
+  fps: { type: 'integer', minimum: 1, maximum: 50, description: '渲染帧率，GIF 默认 20' },
+};
 const eventFrameSchema = {
   type: 'object',
   properties: {
@@ -145,7 +152,8 @@ export const TOOLS = [
         outputDir: { type: 'string', description: '输出目录绝对路径，不存在会自动创建' },
         format: { type: 'string', enum: ['png', 'mov', 'avi', 'gif'], description: '默认 png' },
         animationType: { type: 'string', enum: ['all', 'single', 'current'], description: '默认 all；png + all 时 -o 会被当目录' },
-        lastFrame: { type: 'boolean', description: 'true 时输出动画的每一帧' },
+        ...renderSelection,
+        lastFrame: { type: 'boolean', description: '是否包含末尾采样帧' },
         msaa: { type: 'number', description: '多重采样，实测 4 可用' },
         backgroundColor: { type: 'string', description: '#RRGGBB 或 #RRGGBBAA，会转成 {r,g,b,a}' },
         timeoutMs: { type: 'number', description: 'CLI 超时毫秒数，默认 600000' },
@@ -333,8 +341,9 @@ export const TOOLS = [
         prettyPrint: { type: 'boolean', description: '默认 true；仅 json / binary' },
         nonessential: { type: 'boolean', description: '默认 true；仅 json / binary' },
         cleanUp: { type: 'boolean', description: '默认 false；true 会在导出时清理动画，勿对原件开启（仅 json / binary）' },
-        animationType: { type: 'string', enum: ['all', 'single', 'current'], description: '渲染导出用：all 逐动画逐帧，single / current 只出单张；png + all 时 -o 会被当目录' },
-        lastFrame: { type: 'boolean', description: '渲染导出用：true 时输出动画的每一帧（实测 raptor 的 png 由 8 张变 13 张）' },
+        animationType: { type: 'string', enum: ['all', 'single', 'current'], description: '选择全部、指定或工程当前动画；png + all 时 -o 会被当目录' },
+        ...renderSelection,
+        lastFrame: { type: 'boolean', description: '渲染导出用：是否包含末尾采样帧' },
         msaa: { type: 'number', description: '渲染导出用：多重采样，实测 4 可用，0 表示关闭' },
         backgroundColor: { type: 'string', description: '渲染导出用：#RRGGBB 或 #RRGGBBAA，会转成 CLI 要求的 {r,g,b,a} 对象' },
         overwrite: { type: 'boolean', description: '输出已存在时是否覆盖，默认 false' },
@@ -1032,7 +1041,11 @@ export async function callTool(name, args = {}) {
         projectPath: args.projectPath,
         outputDir: args.outputDir,
         format: args.format ?? 'png',
-        animationType: args.animationType ?? 'all',
+        animationType: args.animationType,
+        animation: args.animation,
+        skeleton: args.skeleton,
+        skin: args.skin,
+        fps: args.fps,
         lastFrame: args.lastFrame,
         msaa: args.msaa,
         backgroundColor: args.backgroundColor,
@@ -1195,13 +1208,23 @@ export async function callTool(name, args = {}) {
       });
       // 渲染导出要靠 mtime 认本次产物，必须在启动 CLI 之前取时间点。
       const startedAt = Date.now();
-      const settingsClass = await readExportClass(args.exportSettingsPath).catch(() => null);
+      const settings = await readExportSettings(args.exportSettingsPath).catch(() => null);
+      const settingsClass = settings?.class;
       const renderFormat = isRenderClass(settingsClass) ? formatForRenderClass(settingsClass) : null;
       const cleaning = args.clean === true;
-      const backupPath = backupIfExists(args.inputPath, cleaning && args.backup !== false);
       const timeoutMs = Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
         ? args.timeoutMs
         : (renderFormat ? 600000 : 120000);
+      if (renderFormat === 'gif' && args.extraInputs?.length) {
+        throw new Error('GIF 使用独立的 PNG 序列，请将 GIF 与 extraInputs 分开导出');
+      }
+      const backupPath = backupIfExists(args.inputPath, cleaning && args.backup !== false);
+      if (renderFormat === 'gif') {
+        const result = await renderGif({
+          projectPath: args.inputPath, outputPath: args.outputDir, settings, clean: cleaning, timeoutMs,
+        });
+        return withBackup(cleaning ? withReloadHint(result) : result, backupPath);
+      }
       const result = await runSpine(cliArgs, { timeoutMs });
       const withOutputs = result.success && renderFormat
         ? {
@@ -1265,6 +1288,10 @@ export async function callTool(name, args = {}) {
         nonessential: args.nonessential,
         cleanUp: args.cleanUp,
         animationType: args.animationType,
+        animation: args.animation,
+        skeleton: args.skeleton,
+        skin: args.skin,
+        fps: args.fps,
         lastFrame: args.lastFrame,
         msaa: args.msaa,
         backgroundColor: args.backgroundColor,

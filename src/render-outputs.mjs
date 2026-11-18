@@ -88,6 +88,7 @@ export async function collectRenderOutputs({ outputPath, format, startedAt = 0, 
     outputPath,
     scannedDirs: [...new Set(scannedDirs)],
     count: outputs.length,
+    ...(outputs.length >= MAX_OUTPUTS ? { truncated: true } : {}),
     totalBytes,
     outputs,
   };

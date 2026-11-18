@@ -196,7 +196,7 @@ node scripts/check-update.mjs      # 等价 npm run check
 | `png` | `export-png` | `image` | `.png` | 通过（raptor 8 帧、3.89 MB） |
 | `mov` | `export-mov` | `video` | `.mov` | 通过（464 KB，文件头 `ftypqt`） |
 | `avi` | `export-avi` | `video` | `.avi` | 通过（21.9 KB，文件头 `RIFF…AVI `） |
-| `gif` | `export-gif` | `video` | `.gif` | 通过（19.8 KB，文件头 `GIF89a`） |
+| `gif` | `export-gif` | `animation` | `.gif` | 通过（原生 PNG 帧编码，普攻前后实测 26／20 帧） |
 
 - **最大的坑是 `-o` 的语义不同**：数据导出的 `-o` 是**目录**，渲染导出的 `-o` 是**文件基名**。传 `D:/out/raptor` 会得到 `D:/out/raptor.mov`；传 `D:/out` 会得到与目录同级的 `D:/out.mov`，目录本身是空的——这正是首轮实测「导出成功但输出目录为空」的原因。
 - **例外**：`png` + `animationType: "all"` 时 `-o` 被当成目录，帧写进目录内，命名 `<skeleton>-<animation>_<帧号>.png`；`single` / `current` 时按文件基名处理，产出 `<基名>_<帧号>.png`。`outputPathKind()` 把这条规则显式化，工具返回值里直接给出。
@@ -206,6 +206,25 @@ node scripts/check-update.mjs      # 等价 npm run check
 - **刻意不开放 `scale`**：实测它按「世界单位 → 像素」解释，`0.5` 会把 1281×1040 的图变成 13×11，与「相对自动适配的倍率」直觉完全不符，交给 CLI 自动适配更安全。
 - **`spine_export_workflow` 不接渲染格式**：它的 `-o` 是目录语义，多个 job 会互相覆盖；渲染导出直接用 `spine_export`。
 - `npm test` **81/81**。
+
+### GIF 动画预览
+
+Spine 3.8.75 原生 GIF 在部分工程会写出 1×1 空白帧，也可能丢失开头的贴图。MCP 的 `spine_render_preview` 和单次 `spine_export` 使用 Spine 原生 PNG 序列，再将各帧编码为 GIF。返回值随文件给出 `width`、`height`、`frameCount` 和 `durationMs`。遇到全空白、画布不一致或帧号断档会返回失败。
+
+```json
+{
+  "projectPath": "D:/proj/citizen_001.spine",
+  "outputDir": "D:/out/preview",
+  "format": "gif",
+  "animation": "Attack_Sword_Test_Light_001",
+  "skeleton": "citizen_001-turn",
+  "skin": "base",
+  "fps": 30,
+  "backgroundColor": "#08101A"
+}
+```
+
+指定 `animation` 会选择单条动画。多骨架或换肤工程可提供 `skeleton` 和 `skin`。GIF 默认 20 fps，可指定 1–50 fps。产出多条序列时，每个动画与皮肤组合各生成一份 GIF。使用 `spine_export` 时，先用 `spine_make_export_settings` 生成同样的选择参数，`outputDir` 传文件基名。
 
 ## P10：约束参数修改
 
@@ -348,7 +367,7 @@ header → 字符串表 → bones → slots → ik → transform → path
 - 不需要预先准备 `export-settings.json`：内部生成 → 调 CLI → 回收产物 → 删临时设置，`settings.removed=true` 可确认。
 - 参数：`format`（png/mov/avi/gif）、`animationType`（all/single/current）、`lastFrame`、`msaa`、`backgroundColor`、`timeoutMs`、`dryRun`。
 - `-o` 语义沿用 P9：png + `animationType=all` 时当**目录**，其余是**文件基名**（内部用工程名当基名）。
-- 默认只出每个动画的首帧；要每一帧加 `lastFrame: true`。
+- GIF 会编码完整的帧序列。`lastFrame` 控制是否额外包含末尾采样帧。
 - **浅色美术一定要换背景**：实测白底导出 citizen_001 几乎全白、看着像「没渲染」，换 `#202020` 后能看到完整角色并确认贴图正常。默认白底在这个场景会误导判断。
 - 失败时回传 `error`（取 `Caused by` 那行）与已扫描目录，不静默成功。
 
